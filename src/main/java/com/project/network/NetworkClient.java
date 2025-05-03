@@ -451,15 +451,34 @@ public class NetworkClient {
             JsonObject confirmMsg = new JsonObject();
             confirmMsg.addProperty("type", "sync_confirmation");
             confirmMsg.addProperty("receivedLength", currentDocLength);
+            confirmMsg.addProperty("userId", userId);
             
             webSocketClient.send(gson.toJson(confirmMsg));
             
             System.out.println("Sent document sync confirmation with length: " + currentDocLength);
             
-            // If we have content and server expects it, resend the document update
-            if (currentDocLength > 0) {
-                // Force a sync update by creating a special request operation
-                Operation requestResyncOperation = new Operation(Operation.Type.REQUEST_DOCUMENT_RESYNC, null, null, userId, -1);
+            // Check if server expects us to have content but we don't
+            int expectedLength = -1;
+            if (message.has("expectedLength")) {
+                expectedLength = message.get("expectedLength").getAsInt();
+            }
+            
+            // If server expects content but we have none, or lengths don't match,
+            // request a document resync
+            if ((expectedLength > 0 && currentDocLength <= 0) || 
+                (expectedLength > 0 && expectedLength != currentDocLength)) {
+                System.out.println("Length mismatch: local=" + currentDocLength + 
+                                  ", expected=" + expectedLength + ". Requesting resync.");
+                
+                // Force a document resync
+                JsonObject resyncRequest = new JsonObject();
+                resyncRequest.addProperty("type", "request_resync");
+                resyncRequest.addProperty("userId", userId);
+                webSocketClient.send(gson.toJson(resyncRequest));
+                
+                // Also notify listeners to trigger a local resync request
+                Operation requestResyncOperation = new Operation(Operation.Type.REQUEST_DOCUMENT_RESYNC, 
+                                                              null, null, userId, -1);
                 notifyOperationListeners(requestResyncOperation);
             }
         } catch (Exception e) {
@@ -471,6 +490,7 @@ public class NetworkClient {
             errorMsg.addProperty("type", "sync_confirmation");
             errorMsg.addProperty("receivedLength", -1);
             errorMsg.addProperty("error", e.getMessage());
+            errorMsg.addProperty("userId", userId);
             
             webSocketClient.send(gson.toJson(errorMsg));
         }
@@ -563,10 +583,14 @@ public class NetworkClient {
             return;
         }
         
+        // Don't send empty content
+        final String finalContent = (content == null) ? "" : content;
+        
         JsonObject message = new JsonObject();
         message.addProperty("type", "document_update");
         message.addProperty("userId", userId);
-        message.addProperty("content", content);
+        message.addProperty("content", finalContent);
+        message.addProperty("timestamp", System.currentTimeMillis());
         
         // Add retry logic for important document updates
         try {
@@ -577,6 +601,25 @@ public class NetworkClient {
                 Thread.sleep(50);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+            }
+            
+            // For non-empty content, schedule an automatic resend after a delay
+            // to ensure other clients receive it
+            if (finalContent.length() > 0) {
+                new Thread(() -> {
+                    try {
+                        // Wait longer before second attempt
+                        Thread.sleep(500);
+                        if (connected) {
+                            // Add a sequence number to avoid duplicates on server
+                            message.addProperty("seq", System.currentTimeMillis());
+                            webSocketClient.send(gson.toJson(message));
+                            System.out.println("Sent followup document update with " + finalContent.length() + " chars");
+                        }
+                    } catch (Exception ex) {
+                        System.err.println("Scheduled resend failed: " + ex.getMessage());
+                    }
+                }).start();
             }
         } catch (Exception e) {
             System.err.println("Error sending document update: " + e.getMessage());

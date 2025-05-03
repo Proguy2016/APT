@@ -25,6 +25,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -438,27 +439,38 @@ public class EditorController {
     }
     
     private void handleDocumentSync(String content) {
-        if (content == null || content.isEmpty() || isUpdatingText.get()) {
+        if (content == null || isUpdatingText.get()) {
             return;
         }
         
-        // Reset the document
-        document = new CRDTDocument(userId);
-        
-        // Reset the UI first to show the sync is happening
-        updateEditorText("");
-        
-        // Insert each character
-        for (int i = 0; i < content.length(); i++) {
-            document.localInsert(i, content.charAt(i));
+        try {
+            // Reset the document
+            document = new CRDTDocument(userId);
+            
+            // Reset the UI first to show the sync is happening
+            updateEditorText("");
+            
+            // Insert each character
+            if (!content.isEmpty()) {
+                // Insert all characters at once rather than one by one
+                for (int i = 0; i < content.length(); i++) {
+                    document.localInsert(i, content.charAt(i));
+                }
+            
+                // Update the UI
+                updateEditorText(content);
+                
+                // Log successful sync
+                System.out.println("Document synchronized with " + content.length() + " characters");
+                updateStatus("Document synchronized successfully");
+            } else {
+                updateStatus("Synchronized empty document");
+            }
+        } catch (Exception e) {
+            System.err.println("Error during document sync: " + e.getMessage());
+            e.printStackTrace();
+            updateStatus("Error during document sync: " + e.getMessage());
         }
-        
-        // Update the UI
-        updateEditorText(content);
-        
-        // Log successful sync
-        System.out.println("Document synchronized with " + content.length() + " characters");
-        updateStatus("Document synchronized successfully");
     }
     
     private void updateEditorText(String newText) {
@@ -523,17 +535,23 @@ public class EditorController {
             return;
         }
         
-        CursorMarker marker = cursorMarkers.get(userId);
-        if (marker != null) {
-            if (position >= 0) {
-                marker.updatePosition(position);
-            } else {
-                // Position -1 indicates cursor removal
-                marker.remove();
-                marker.dispose();
-                cursorMarkers.remove(userId);
+        Platform.runLater(() -> {
+            try {
+                CursorMarker marker = cursorMarkers.get(userId);
+                if (marker != null) {
+                    if (position >= 0) {
+                        marker.updatePosition(position);
+                    } else {
+                        // Position -1 indicates cursor removal
+                        marker.remove();
+                        marker.dispose();
+                        cursorMarkers.remove(userId);
+                    }
+                }
+            } catch (Exception e) {
+                System.err.println("Error updating cursor for user " + userId + ": " + e.getMessage());
             }
-        }
+        });
     }
     
     private void handleBackspace() {
@@ -707,26 +725,58 @@ public class EditorController {
             String code = result.getKey();
             boolean isEditorRole = result.getValue();
             
-            // Update our editor status
-            isEditor = isEditorRole;
-            
-            // Update UI based on role
-            editorArea.setEditable(isEditor);
-            
-            // Clear the editor before joining to prepare for document sync
-            processBatchInserts(); // Process any pending operations
-            updateEditorText(""); // Clear editor
-            
-            // Join the session
-            networkClient.joinSession(code, isEditor);
-            
-            if (isEditor) {
-                updateStatus("Joined session as editor - waiting for content sync...");
-            } else {
-                updateStatus("Joined session as viewer - waiting for content sync...");
-                // Hide the sharing codes for viewers
-                editorCodeField.setText("");
-                viewerCodeField.setText("");
+            try {
+                // Update our editor status
+                isEditor = isEditorRole;
+                
+                // Update UI based on role
+                editorArea.setEditable(isEditor);
+                
+                // Clear the editor before joining to prepare for document sync
+                processBatchInserts(); // Process any pending operations
+                updateEditorText(""); // Clear editor
+                document = new CRDTDocument(userId); // Reset document
+                
+                // Remove all cursor markers
+                for (CursorMarker marker : new ArrayList<>(cursorMarkers.values())) {
+                    marker.remove();
+                    marker.dispose();
+                }
+                cursorMarkers.clear();
+                
+                // Join the session
+                networkClient.joinSession(code, isEditor);
+                
+                if (isEditor) {
+                    updateStatus("Joined session as editor - waiting for content sync...");
+                } else {
+                    updateStatus("Joined session as viewer - waiting for content sync...");
+                    // Hide the sharing codes for viewers
+                    editorCodeField.setText("");
+                    viewerCodeField.setText("");
+                }
+                
+                // Force a sync request after a short delay
+                new Thread(() -> {
+                    try {
+                        Thread.sleep(500);
+                        
+                        // Tell the server we need content by sending a special sync request
+                        if (networkClient != null) {
+                            Platform.runLater(() -> {
+                                updateStatus("Requesting document sync...");
+                                Operation requestResyncOperation = 
+                                    new Operation(Operation.Type.REQUEST_DOCUMENT_RESYNC, null, null, userId, -1);
+                                handleRemoteOperation(requestResyncOperation);
+                            });
+                        }
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }).start();
+            } catch (Exception e) {
+                updateStatus("Error joining session: " + e.getMessage());
+                e.printStackTrace();
             }
         });
     }
@@ -879,6 +929,11 @@ public class EditorController {
                         // Wait for the session join to complete and content sync
                         try {
                             Thread.sleep(500);
+                            
+                            // Force a document sync request after joining
+                            Operation requestResyncOperation = 
+                                new Operation(Operation.Type.REQUEST_DOCUMENT_RESYNC, null, null, userId, -1);
+                            handleRemoteOperation(requestResyncOperation);
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
                         }
@@ -897,8 +952,7 @@ public class EditorController {
                     
                     // Insert the content character by character
                     for (int i = 0; i < content.length(); i++) {
-                        char c = content.charAt(i);
-                        document.localInsert(i, c);
+                        document.localInsert(i, content.charAt(i));
                     }
                     
                     // Update the text area

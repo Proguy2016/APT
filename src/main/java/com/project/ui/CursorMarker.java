@@ -28,10 +28,13 @@ public class CursorMarker {
     
     // Size constants
     private static final double CURSOR_HEIGHT = 16.0;
-    private static final double CURSOR_WIDTH = 2.0; // Slightly thicker for better visibility
+    private static final double CURSOR_WIDTH = 2.5; // Increased width for better visibility
     private static final double LABEL_OFFSET_Y = -16.0;
     
     private final FadeTransition blinkAnimation;
+    
+    // Add listeners for scroll events
+    private javafx.beans.value.ChangeListener<Number> scrollListener;
     
     /**
      * Creates a new cursor marker.
@@ -56,6 +59,23 @@ public class CursorMarker {
         blinkAnimation.setCycleCount(FadeTransition.INDEFINITE);
         blinkAnimation.setAutoReverse(true);
         blinkAnimation.play();
+        
+        // Add listeners for text area scrolling to update cursor positions
+        setupScrollListeners();
+    }
+    
+    /**
+     * Sets up listeners to update cursor positions when text area scrolls
+     */
+    private void setupScrollListeners() {
+        // Create a listener that updates cursor visuals on scroll
+        scrollListener = (observable, oldValue, newValue) -> {
+            updateVisuals();
+        };
+        
+        // Add the listener to both vertical and horizontal scrollbars
+        textArea.scrollTopProperty().addListener(scrollListener);
+        textArea.scrollLeftProperty().addListener(scrollListener);
     }
     
     /**
@@ -67,11 +87,12 @@ public class CursorMarker {
         cursorLine.setStroke(color);
         cursorLine.setStrokeWidth(CURSOR_WIDTH);
         cursorLine.setVisible(false); // Hide initially
+        cursorLine.setOpacity(0.9); // Slightly transparent but clearly visible
         
         // Create a label for the user ID
         usernameLabel = new Text(userId);
         usernameLabel.setFill(color);
-        usernameLabel.setOpacity(1.0); // Full opacity for better visibility
+        usernameLabel.setOpacity(0.9); // Matching opacity
         usernameLabel.setVisible(false); // Hide initially
         
         // Add the elements to the parent pane
@@ -105,21 +126,19 @@ public class CursorMarker {
                 double x = cursorPoint.getX();
                 double y = cursorPoint.getY();
                 
-                // Calculate offset from top of textArea (accounting for scrolling)
-                double visibleY = y - textArea.getScrollTop();
-                double visibleX = x;
-                
-                // Only show cursor if it's in the visible area of the TextArea
-                if (visibleY >= 0 && visibleY <= textArea.getHeight()) {
-                    // Position the cursor line
-                    cursorLine.setStartX(visibleX);
-                    cursorLine.setStartY(visibleY);
-                    cursorLine.setEndX(visibleX);
-                    cursorLine.setEndY(visibleY + CURSOR_HEIGHT);
+                // Make sure cursor is within visible area
+                if (y >= 0 && y <= textArea.getHeight() && 
+                    x >= 0 && x <= textArea.getWidth()) {
                     
-                    // Position the username label
-                    usernameLabel.setLayoutX(visibleX);
-                    usernameLabel.setLayoutY(visibleY + LABEL_OFFSET_Y);
+                    // Position the cursor line
+                    cursorLine.setStartX(x);
+                    cursorLine.setStartY(y);
+                    cursorLine.setEndX(x);
+                    cursorLine.setEndY(y + CURSOR_HEIGHT);
+                    
+                    // Position the username label above the cursor
+                    usernameLabel.setLayoutX(x);
+                    usernameLabel.setLayoutY(y + LABEL_OFFSET_Y);
                     
                     // Make sure the elements are visible
                     cursorLine.setVisible(true);
@@ -132,6 +151,7 @@ public class CursorMarker {
             cursorLine.setVisible(false);
             usernameLabel.setVisible(false);
         } catch (Exception e) {
+            System.err.println("Error updating cursor visuals: " + e.getMessage());
             // If there's an error, hide the cursor
             cursorLine.setVisible(false);
             usernameLabel.setVisible(false);
@@ -145,50 +165,65 @@ public class CursorMarker {
      */
     private Point2D getCursorPoint(int position) {
         try {
-            // Save the current position
-            int originalPosition = textArea.getCaretPosition();
-            
-            // Move caret to desired position and wait for layout
-            textArea.positionCaret(position);
-            
-            // Get the position of the character at this index
-            // This is a more direct approach to get the actual pixel position
-            
-            // Calculate the row and column
             String text = textArea.getText();
-            int row = 0;
-            int col = 0;
+            if (text.isEmpty() || position < 0) {
+                // For empty text or invalid position, position at top-left
+                return new Point2D(5, 5);
+            }
             
-            for (int i = 0; i < position && i < text.length(); i++) {
-                if (text.charAt(i) == '\n') {
-                    row++;
-                    col = 0;
-                } else {
-                    col++;
+            // Ensure position is within bounds
+            int safePosition = Math.min(position, text.length());
+            
+            // Calculate line and column for position
+            int line = 0;
+            int lineStartPos = 0;
+            
+            // Find which line contains our position
+            for (int i = 0; i < safePosition; i++) {
+                if (i < text.length() && text.charAt(i) == '\n') {
+                    line++;
+                    lineStartPos = i + 1;
                 }
             }
             
-            // Get a sample character to measure dimensions
-            Text charText = new Text("I");
-            charText.setFont(textArea.getFont());
-            double charWidth = charText.getBoundsInLocal().getWidth();
-            double lineHeight = charText.getBoundsInLocal().getHeight() * 1.2;
+            // Calculate column (chars from start of current line)
+            int column = safePosition - lineStartPos;
             
-            // Get the top-left corner of the TextArea within the scene
-            Bounds textAreaBounds = textArea.getBoundsInParent();
-            double textAreaX = textAreaBounds.getMinX() + 5; // Left padding
-            double textAreaY = textAreaBounds.getMinY() + 5; // Top padding
+            // Create a temporary text node to calculate position
+            Text tempText = new Text();
+            tempText.setFont(textArea.getFont());
             
-            // Calculate cursor position based on row/column
-            double cursorX = textAreaX + (col * charWidth);
-            double cursorY = textAreaY + (row * lineHeight);
+            // Get the line content up to our position
+            String lineContent = "";
+            int nextNewline = text.indexOf('\n', lineStartPos);
+            if (nextNewline == -1) {
+                // Last line
+                lineContent = text.substring(lineStartPos);
+            } else {
+                lineContent = text.substring(lineStartPos, nextNewline);
+            }
             
-            // Restore original position
-            textArea.positionCaret(originalPosition);
+            // Get column content (for width calculation)
+            String columnContent = column > 0 ? lineContent.substring(0, Math.min(column, lineContent.length())) : "";
+            tempText.setText(columnContent);
             
-            return new Point2D(cursorX, cursorY);
+            // Calculate text width and height
+            double charWidth = tempText.getBoundsInLocal().getWidth() / Math.max(1, columnContent.length());
+            double lineHeight = new Text("X").getBoundsInLocal().getHeight() * 1.2; // Line height
+            
+            // Calculate position
+            double x = 5.0 + (column * charWidth); // Add padding
+            double y = 5.0 + (line * lineHeight);  // Add padding
+            
+            // Adjust for scroll position
+            x -= textArea.getScrollLeft();
+            y -= textArea.getScrollTop();
+            
+            return new Point2D(x, y);
         } catch (Exception e) {
-            return null;
+            System.err.println("Error calculating cursor position: " + e.getMessage());
+            // Default to top-left corner if calculation fails
+            return new Point2D(5, 5);
         }
     }
     
@@ -196,6 +231,13 @@ public class CursorMarker {
      * Removes this cursor marker from its parent.
      */
     public void remove() {
+        // Remove scroll listeners
+        if (scrollListener != null) {
+            textArea.scrollTopProperty().removeListener(scrollListener);
+            textArea.scrollLeftProperty().removeListener(scrollListener);
+        }
+        
+        // Remove visual elements
         parent.getChildren().removeAll(cursorLine, usernameLabel);
     }
     
@@ -244,5 +286,6 @@ public class CursorMarker {
      */
     public void dispose() {
         blinkAnimation.stop();
+        remove();
     }
 } 
