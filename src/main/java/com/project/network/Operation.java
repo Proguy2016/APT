@@ -16,7 +16,9 @@ public class Operation {
         DELETE,
         CURSOR_MOVE,
         PRESENCE,
-        DOCUMENT_SYNC
+        DOCUMENT_SYNC,
+        GET_DOCUMENT_LENGTH,
+        REQUEST_DOCUMENT_RESYNC
     }
     
     private final Type type;
@@ -25,6 +27,7 @@ public class Operation {
     private final String userId;
     private final int cursorPosition;
     private final String documentContent;
+    private int documentLength = -1; // For GET_DOCUMENT_LENGTH operation response
     
     /**
      * Creates a new operation.
@@ -104,6 +107,22 @@ public class Operation {
         return documentContent;
     }
     
+    /**
+     * Sets the document length for GET_DOCUMENT_LENGTH operation responses.
+     * @param length The document length.
+     */
+    public void setDocumentLength(int length) {
+        this.documentLength = length;
+    }
+    
+    /**
+     * Gets the document length for GET_DOCUMENT_LENGTH operation responses.
+     * @return The document length.
+     */
+    public int getDocumentLength() {
+        return documentLength;
+    }
+    
     @Override
     public String toString() {
         switch (type) {
@@ -117,6 +136,10 @@ public class Operation {
                 return "PRESENCE operation by " + userId;
             case DOCUMENT_SYNC:
                 return "DOCUMENT_SYNC operation by " + userId;
+            case GET_DOCUMENT_LENGTH:
+                return "GET_DOCUMENT_LENGTH operation by " + userId;
+            case REQUEST_DOCUMENT_RESYNC:
+                return "REQUEST_DOCUMENT_RESYNC operation by " + userId;
             default:
                 return "Unknown operation type";
         }

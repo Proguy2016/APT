@@ -102,6 +102,9 @@ public class EditorController {
     // Map of user IDs to usernames
     private Map<String, String> userMap = new HashMap<>();
     
+    // Flag to track whether initialize() has been called
+    private boolean initialized = false;
+    
     /**
      * Sets a custom user ID. Must be called before initialize().
      * @param userId the user ID to set
@@ -116,60 +119,85 @@ public class EditorController {
      */
     public void setUsername(String username) {
         this.username = username;
+        // Store in user map right away
+        if (userId != null && username != null) {
+            userMap.put(userId, username);
+        }
     }
     
     /**
-     * Sets the document information. Must be called before initialize().
+     * Sets the document information. If initialize() has already been called,
+     * this will immediately load the document.
      * @param documentId the document ID
      * @param documentTitle the document title
      */
     public void setDocumentInfo(String documentId, String documentTitle) {
         this.documentId = documentId;
         this.documentTitle = documentTitle;
+        
+        // If already initialized, load the document now
+        if (initialized && documentId != null) {
+            try {
+                // Give a little time for network connection to establish
+                Thread.sleep(200);
+                loadDocumentContent();
+            } catch (Exception e) {
+                updateStatus("Error loading document: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
     }
     
     @FXML
     public void initialize() {
-        // Initialize the CRDT document with a site ID (user ID or random UUID)
-        String siteId = (userId != null) ? userId : UUID.randomUUID().toString();
-        document = new CRDTDocument(siteId);
-        
-        // Initialize the network client
-        networkClient = new NetworkClient(siteId);
-        
-        // Set up listeners
-        setupNetworkListeners();
-        setupEditorListeners();
-        
-        // Initialize user list
-        usersListView.setItems(users);
-        
-        // Connect to the network
-        boolean connected = networkClient.connect();
-        if (connected) {
-            updateStatus("Connected to network as " + (username != null ? username : siteId));
-            
-            // Load document content if applicable
-            if (documentId != null) {
-                loadDocumentContent();
-            }
-            
-            // Setup auto-save timer (save every 30 seconds)
-            setupAutoSaveTimer();
-            
-            // Setup batch timer for performance
-            setupBatchTimer();
-        } else {
-            updateStatus("Failed to connect to network");
+        // Prevent double initialization
+        if (initialized) {
+            return;
         }
         
-        // Make sure editorContainer contains editorArea
-        if (!editorContainer.getChildren().contains(editorArea)) {
-            editorContainer.getChildren().add(editorArea);
-            AnchorPane.setTopAnchor(editorArea, 0.0);
-            AnchorPane.setRightAnchor(editorArea, 0.0);
-            AnchorPane.setBottomAnchor(editorArea, 0.0);
-            AnchorPane.setLeftAnchor(editorArea, 0.0);
+        try {
+            // Initialize the CRDT document with a site ID (user ID or random UUID)
+            String siteId = (userId != null) ? userId : UUID.randomUUID().toString();
+            document = new CRDTDocument(siteId);
+            
+            // Initialize the network client
+            networkClient = new NetworkClient(siteId);
+            
+            // Set up listeners
+            setupNetworkListeners();
+            setupEditorListeners();
+            
+            // Initialize user list
+            usersListView.setItems(users);
+            
+            // Connect to the network
+            boolean connected = networkClient.connect();
+            if (connected) {
+                updateStatus("Connected to network as " + (username != null ? username : siteId));
+                
+                // Setup auto-save timer (save every 30 seconds)
+                setupAutoSaveTimer();
+                
+                // Setup batch timer for performance
+                setupBatchTimer();
+            } else {
+                updateStatus("Failed to connect to network");
+            }
+            
+            // Make sure editorContainer contains editorArea
+            if (!editorContainer.getChildren().contains(editorArea)) {
+                editorContainer.getChildren().add(editorArea);
+                AnchorPane.setTopAnchor(editorArea, 0.0);
+                AnchorPane.setRightAnchor(editorArea, 0.0);
+                AnchorPane.setBottomAnchor(editorArea, 0.0);
+                AnchorPane.setLeftAnchor(editorArea, 0.0);
+            }
+            
+            // Set flag to prevent double initialization
+            initialized = true;
+        } catch (Exception e) {
+            updateStatus("Error initializing editor: " + e.getMessage());
+            e.printStackTrace();
         }
     }
     
@@ -381,6 +409,17 @@ public class EditorController {
             case DOCUMENT_SYNC:
                 handleDocumentSync(operation.getDocumentContent());
                 break;
+            case GET_DOCUMENT_LENGTH:
+                // This is a request to get the current document length (for sync confirmation)
+                // We just need to set the document length on the operation object
+                operation.setDocumentLength(document != null ? document.getText().length() : 0);
+                break;
+            case REQUEST_DOCUMENT_RESYNC:
+                // Force resend the current document content to the server
+                if (document != null && document.getText().length() > 0) {
+                    networkClient.sendDocumentUpdate(document.getText());
+                }
+                break;
             case PRESENCE:
                 // This is handled by the presence listener
                 break;
@@ -406,6 +445,9 @@ public class EditorController {
         // Reset the document
         document = new CRDTDocument(userId);
         
+        // Reset the UI first to show the sync is happening
+        updateEditorText("");
+        
         // Insert each character
         for (int i = 0; i < content.length(); i++) {
             document.localInsert(i, content.charAt(i));
@@ -413,6 +455,10 @@ public class EditorController {
         
         // Update the UI
         updateEditorText(content);
+        
+        // Log successful sync
+        System.out.println("Document synchronized with " + content.length() + " characters");
+        updateStatus("Document synchronized successfully");
     }
     
     private void updateEditorText(String newText) {
@@ -523,17 +569,25 @@ public class EditorController {
         // Get the current caret position
         int caretPosition = editorArea.getCaretPosition();
         
+        // First update the UI immediately for responsiveness
+        String text = editorArea.getText();
+        int insertPos = Math.min(caretPosition, text.length());
+        text = text.substring(0, insertPos) + "\n" + text.substring(insertPos);
+        
+        // Avoid triggering cursor update events during UI update
+        isUpdatingText.set(true);
+        try {
+            editorArea.setText(text);
+            editorArea.positionCaret(caretPosition + 1);
+        } finally {
+            isUpdatingText.set(false);
+        }
+        
         // Insert a newline character in the CRDT document
         CRDTCharacter character = document.localInsert(caretPosition, '\n');
         
         // Send the insertion to the network
         networkClient.sendInsert(character);
-        
-        // Update the text area with the document's current text
-        updateEditorText(document.getText());
-        
-        // Restore the caret position after the newline
-        editorArea.positionCaret(caretPosition + 1);
         
         // Send cursor position to network
         networkClient.sendCursorMove(caretPosition + 1);
@@ -659,13 +713,17 @@ public class EditorController {
             // Update UI based on role
             editorArea.setEditable(isEditor);
             
+            // Clear the editor before joining to prepare for document sync
+            processBatchInserts(); // Process any pending operations
+            updateEditorText(""); // Clear editor
+            
             // Join the session
             networkClient.joinSession(code, isEditor);
             
             if (isEditor) {
-                updateStatus("Joined session as editor");
+                updateStatus("Joined session as editor - waiting for content sync...");
             } else {
-                updateStatus("Joined session as viewer");
+                updateStatus("Joined session as viewer - waiting for content sync...");
                 // Hide the sharing codes for viewers
                 editorCodeField.setText("");
                 viewerCodeField.setText("");
@@ -680,8 +738,11 @@ public class EditorController {
             return;
         }
         
-        copyToClipboard(editorCodeField.getText());
-        updateStatus("Editor code copied to clipboard");
+        String code = editorCodeField.getText();
+        if (code != null && !code.isEmpty()) {
+            copyToSystemClipboard(code);
+            updateStatus("Editor code copied to clipboard");
+        }
     }
     
     @FXML
@@ -691,8 +752,11 @@ public class EditorController {
             return;
         }
         
-        copyToClipboard(viewerCodeField.getText());
-        updateStatus("Viewer code copied to clipboard");
+        String code = viewerCodeField.getText();
+        if (code != null && !code.isEmpty()) {
+            copyToSystemClipboard(code);
+            updateStatus("Viewer code copied to clipboard");
+        }
     }
     
     @FXML
@@ -726,34 +790,188 @@ public class EditorController {
         ((Stage) editorArea.getScene().getWindow()).close();
     }
     
-    private void copyToClipboard(String text) {
-        // In a real implementation, we would use the system clipboard
-        // For now, we'll just update the status
+    /**
+     * Copies text to the system clipboard.
+     * @param text The text to copy.
+     */
+    private void copyToSystemClipboard(String text) {
+        try {
+            // Use JavaFX Clipboard
+            final javafx.scene.input.Clipboard clipboard = javafx.scene.input.Clipboard.getSystemClipboard();
+            final javafx.scene.input.ClipboardContent content = new javafx.scene.input.ClipboardContent();
+            content.putString(text);
+            clipboard.setContent(content);
+        } catch (Exception e) {
+            updateStatus("Could not copy to clipboard: " + e.getMessage());
+        }
     }
     
     private void updateStatus(String message) {
         statusLabel.setText(message);
     }
     
+    @FXML
+    private void handleOpenDocuments(ActionEvent event) {
+        try {
+            // Process any pending inserts before changing documents
+            processBatchInserts();
+            
+            // Save current document if needed
+            saveDocument();
+            
+            // Leave current session if in one
+            leaveCurrentSession();
+            
+            // Show document selection dialog
+            Pair<String, String> documentInfo = DocumentSelectionDialog.showDocumentSelectionDialog(userId);
+            if (documentInfo != null) {
+                documentId = documentInfo.getKey();
+                documentTitle = documentInfo.getValue();
+                
+                // Set window title
+                Stage stage = (Stage) editorArea.getScene().getWindow();
+                stage.setTitle("Collaborative Text Editor - " + documentTitle + " (" + username + ")");
+                
+                // Load the newly selected document
+                loadDocumentContent();
+                
+                updateStatus("Opened document: " + documentTitle);
+            }
+        } catch (Exception e) {
+            updateStatus("Error opening document: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    
     private void loadDocumentContent() {
         try {
+            // First clear any existing content and process any pending operations
+            processBatchInserts();
+            document = new CRDTDocument(userId);
+            updateEditorText("");
+            
+            updateStatus("Loading document: " + documentTitle + "...");
+            
             org.bson.Document doc = DatabaseService.getInstance().getDocument(documentId);
             if (doc != null) {
                 String content = doc.getString("content");
+                
+                // Check for existing session
+                String existingSessionCode = null;
+                try {
+                    existingSessionCode = doc.getString("sessionCode");
+                } catch (Exception e) {
+                    System.err.println("Error reading session code: " + e.getMessage());
+                }
+                
+                // If this document has an existing session, join that session
+                if (existingSessionCode != null && !existingSessionCode.isEmpty()) {
+                    try {
+                        updateStatus("Joining existing session: " + existingSessionCode);
+                        
+                        // Join the existing session as an editor
+                        networkClient.joinSession(existingSessionCode, true);
+                        isEditor = true;
+                        
+                        // Update the editor code field
+                        editorCodeField.setText(existingSessionCode);
+                        
+                        // Wait for the session join to complete and content sync
+                        try {
+                            Thread.sleep(500);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                        
+                        updateStatus("Joined existing document session: " + existingSessionCode);
+                        return; // Content will be synced through the session
+                    } catch (Exception e) {
+                        System.err.println("Error joining existing session: " + e.getMessage());
+                        // If session join fails, fall back to loading content directly
+                    }
+                }
+                
+                // Otherwise proceed with normal content loading
                 if (content != null && !content.isEmpty()) {
+                    updateStatus("Loading document content...");
+                    
                     // Insert the content character by character
                     for (int i = 0; i < content.length(); i++) {
                         char c = content.charAt(i);
-                        CRDTCharacter character = document.localInsert(i, c);
+                        document.localInsert(i, c);
                     }
                     
                     // Update the text area
                     updateEditorText(content);
+                    
+                    // Explicitly send document update to sync with server
+                    networkClient.sendDocumentUpdate(content);
+                    
                     updateStatus("Loaded document: " + documentTitle);
+                } else {
+                    // Empty document
+                    updateEditorText("");
+                    updateStatus("Loaded empty document: " + documentTitle);
                 }
+            } else {
+                // No document found
+                updateStatus("Could not find document with ID: " + documentId);
             }
         } catch (Exception e) {
             updateStatus("Error loading document: " + e.getMessage());
+            e.printStackTrace();
+            
+            // Reset to empty document in case of error
+            try {
+                document = new CRDTDocument(userId);
+                updateEditorText("");
+            } catch (Exception ex) {
+                System.err.println("Failed to reset document: " + ex.getMessage());
+            }
+        }
+    }
+    
+    /**
+     * Leaves the current editing session if any.
+     */
+    private void leaveCurrentSession() {
+        try {
+            // Clear sharing codes
+            editorCodeField.setText("");
+            viewerCodeField.setText("");
+            
+            // Remove all cursor markers
+            for (CursorMarker marker : cursorMarkers.values()) {
+                marker.remove();
+                marker.dispose();
+            }
+            cursorMarkers.clear();
+            
+            // Clear users list
+            users.clear();
+            
+            // Reset to editor mode
+            isEditor = true;
+            editorArea.setEditable(true);
+            
+            // Send leave session message (if supported by the server)
+            // For now, just disconnect and reconnect
+            if (networkClient != null) {
+                networkClient.disconnect();
+                
+                // Wait a bit before reconnecting
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                
+                networkClient = new NetworkClient(userId);
+                setupNetworkListeners();
+                networkClient.connect();
+            }
+        } catch (Exception e) {
+            System.err.println("Error leaving session: " + e.getMessage());
             e.printStackTrace();
         }
     }
@@ -778,7 +996,14 @@ public class EditorController {
         
         if (documentId != null) {
             String content = document.getText();
-            boolean saved = DatabaseService.getInstance().updateDocument(documentId, content);
+            
+            // Get the session code if we're in one
+            String sessionCode = "";
+            if (editorCodeField.getText() != null && !editorCodeField.getText().isEmpty()) {
+                sessionCode = editorCodeField.getText();
+            }
+            
+            boolean saved = DatabaseService.getInstance().updateDocumentWithSession(documentId, content, sessionCode);
             if (saved) {
                 // Also update the server with the complete document
                 networkClient.sendDocumentUpdate(content);
@@ -790,47 +1015,29 @@ public class EditorController {
         }
     }
     
+    /**
+     * Handles the save document action event from the UI.
+     * @param event the action event
+     */
     @FXML
     private void handleSaveDocument(ActionEvent event) {
-        // Process any pending inserts before saving
-        processBatchInserts();
-        
-        if (documentId != null) {
-            String content = document.getText();
-            boolean saved = DatabaseService.getInstance().updateDocument(documentId, content);
-            if (saved) {
-                // Also update the server with the complete document
+        try {
+            // Process any pending batch operations first
+            processBatchInserts();
+            
+            // Save the document
+            saveDocument();
+            
+            // Force a document update to ensure it's synced with the server
+            if (document != null) {
+                String content = document.getText();
                 networkClient.sendDocumentUpdate(content);
-                
-                Platform.runLater(() -> updateStatus("Document saved"));
-            } else {
-                Platform.runLater(() -> updateStatus("Failed to save document"));
             }
-        }
-    }
-    
-    @FXML
-    private void handleOpenDocuments(ActionEvent event) {
-        // Process any pending inserts before changing documents
-        processBatchInserts();
-        
-        // Save current document if needed
-        saveDocument();
-        
-        // Show document selection dialog
-        Pair<String, String> documentInfo = DocumentSelectionDialog.showDocumentSelectionDialog(userId);
-        if (documentInfo != null) {
-            documentId = documentInfo.getKey();
-            documentTitle = documentInfo.getValue();
             
-            // Set window title
-            Stage stage = (Stage) editorArea.getScene().getWindow();
-            stage.setTitle("Collaborative Text Editor - " + documentTitle + " (" + username + ")");
-            
-            // Load the newly selected document
-            loadDocumentContent();
-            
-            updateStatus("Opened document: " + documentTitle);
+            updateStatus("Document saved successfully");
+        } catch (Exception e) {
+            updateStatus("Error saving document: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 } 

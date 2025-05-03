@@ -247,6 +247,46 @@ public class DatabaseService {
     }
     
     /**
+     * Updates a document's content and session code.
+     * @param documentId The document ID.
+     * @param content The new content.
+     * @param sessionCode The session code.
+     * @return True if the update was successful, false otherwise.
+     */
+    public boolean updateDocumentWithSession(String documentId, String content, String sessionCode) {
+        if (useInMemoryStorage) {
+            return updateDocumentWithSessionInMemory(documentId, content, sessionCode);
+        }
+        
+        try {
+            Bson filter = Filters.eq("_id", documentId);
+            Bson update = Updates.combine(
+                    Updates.set("content", content),
+                    Updates.set("sessionCode", sessionCode),
+                    Updates.set("updatedAt", new Date())
+            );
+            
+            documentsCollection.updateOne(filter, update);
+            return true;
+        } catch (Exception e) {
+            System.err.println("Error updating document with session: " + e.getMessage());
+            e.printStackTrace();
+            return updateDocumentWithSessionInMemory(documentId, content, sessionCode);
+        }
+    }
+    
+    private boolean updateDocumentWithSessionInMemory(String documentId, String content, String sessionCode) {
+        InMemoryDocument document = documentMap.get(documentId);
+        if (document != null) {
+            document.content = content;
+            document.sessionCode = sessionCode;
+            document.updatedAt = new Date();
+            return true;
+        }
+        return false;
+    }
+    
+    /**
      * Gets a document by ID.
      * @param documentId The document ID.
      * @return The document, or null if not found.
@@ -273,6 +313,7 @@ public class DatabaseService {
             doc.append("title", inMemoryDoc.title);
             doc.append("ownerId", inMemoryDoc.ownerId);
             doc.append("content", inMemoryDoc.content);
+            doc.append("sessionCode", inMemoryDoc.sessionCode);
             doc.append("createdAt", inMemoryDoc.createdAt);
             doc.append("updatedAt", inMemoryDoc.updatedAt);
             return doc;
@@ -311,6 +352,7 @@ public class DatabaseService {
                 doc.append("title", inMemoryDoc.title);
                 doc.append("ownerId", inMemoryDoc.ownerId);
                 doc.append("content", inMemoryDoc.content);
+                doc.append("sessionCode", inMemoryDoc.sessionCode);
                 doc.append("createdAt", inMemoryDoc.createdAt);
                 doc.append("updatedAt", inMemoryDoc.updatedAt);
                 documents.add(doc);
@@ -327,6 +369,7 @@ public class DatabaseService {
             doc.append("title", inMemoryDoc.title);
             doc.append("ownerId", inMemoryDoc.ownerId);
             doc.append("content", inMemoryDoc.content);
+            doc.append("sessionCode", inMemoryDoc.sessionCode);
             doc.append("createdAt", inMemoryDoc.createdAt);
             doc.append("updatedAt", inMemoryDoc.updatedAt);
             documents.add(doc);
@@ -369,6 +412,7 @@ public class DatabaseService {
         public final String title;
         public final String ownerId;
         public String content;
+        public String sessionCode;
         public final Date createdAt;
         public Date updatedAt;
         
@@ -377,6 +421,7 @@ public class DatabaseService {
             this.title = title;
             this.ownerId = ownerId;
             this.content = content;
+            this.sessionCode = "";
             this.createdAt = createdAt;
             this.updatedAt = updatedAt;
         }

@@ -324,6 +324,10 @@ public class NetworkClient {
                     handleDocumentSyncOperation(jsonMessage);
                     break;
                     
+                case "sync_confirmation_request":
+                    handleSyncConfirmationRequest(jsonMessage);
+                    break;
+                    
                 case "sync_confirmation":
                     // Log that document sync is confirmed
                     int docLength = jsonMessage.get("documentLength").getAsInt();
@@ -420,6 +424,59 @@ public class NetworkClient {
     }
     
     /**
+     * Handles a sync confirmation request from the server.
+     * @param message The message from the server.
+     */
+    private void handleSyncConfirmationRequest(JsonObject message) {
+        // Get the current document length through EditorController
+        int currentDocLength = -1;
+        
+        try {
+            // Create a special operation to request the document length
+            Operation getDocumentOperation = new Operation(Operation.Type.GET_DOCUMENT_LENGTH, null, null, userId, -1);
+            
+            // Wait for listener to update the length
+            for (Consumer<Operation> listener : operationListeners) {
+                try {
+                    listener.accept(getDocumentOperation);
+                    // The listener should update the document length in the operation object
+                    currentDocLength = getDocumentOperation.getDocumentLength();
+                    break; // Only need one successful response
+                } catch (Exception e) {
+                    System.err.println("Error getting document length: " + e.getMessage());
+                }
+            }
+            
+            // Send confirmation back to server
+            JsonObject confirmMsg = new JsonObject();
+            confirmMsg.addProperty("type", "sync_confirmation");
+            confirmMsg.addProperty("receivedLength", currentDocLength);
+            
+            webSocketClient.send(gson.toJson(confirmMsg));
+            
+            System.out.println("Sent document sync confirmation with length: " + currentDocLength);
+            
+            // If we have content and server expects it, resend the document update
+            if (currentDocLength > 0) {
+                // Force a sync update by creating a special request operation
+                Operation requestResyncOperation = new Operation(Operation.Type.REQUEST_DOCUMENT_RESYNC, null, null, userId, -1);
+                notifyOperationListeners(requestResyncOperation);
+            }
+        } catch (Exception e) {
+            System.err.println("Error handling sync confirmation request: " + e.getMessage());
+            e.printStackTrace();
+            
+            // Send error notification
+            JsonObject errorMsg = new JsonObject();
+            errorMsg.addProperty("type", "sync_confirmation");
+            errorMsg.addProperty("receivedLength", -1);
+            errorMsg.addProperty("error", e.getMessage());
+            
+            webSocketClient.send(gson.toJson(errorMsg));
+        }
+    }
+    
+    /**
      * Adds a listener for operations.
      * @param listener The listener to add.
      */
@@ -511,6 +568,31 @@ public class NetworkClient {
         message.addProperty("userId", userId);
         message.addProperty("content", content);
         
-        webSocketClient.send(gson.toJson(message));
+        // Add retry logic for important document updates
+        try {
+            webSocketClient.send(gson.toJson(message));
+            
+            // Add a small delay to allow the server to process before any further operations
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        } catch (Exception e) {
+            System.err.println("Error sending document update: " + e.getMessage());
+            e.printStackTrace();
+            
+            // Try again once after a short delay
+            new Thread(() -> {
+                try {
+                    Thread.sleep(100);
+                    if (connected) {
+                        webSocketClient.send(gson.toJson(message));
+                    }
+                } catch (Exception ex) {
+                    System.err.println("Retry failed: " + ex.getMessage());
+                }
+            }).start();
+        }
     }
 } 

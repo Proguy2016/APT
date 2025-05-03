@@ -8,6 +8,7 @@ import javafx.scene.shape.Line;
 import javafx.scene.text.Text;
 import javafx.animation.FadeTransition;
 import javafx.util.Duration;
+import javafx.geometry.Point2D;
 
 /**
  * A visual marker that represents another user's cursor in the editor.
@@ -65,11 +66,13 @@ public class CursorMarker {
         cursorLine = new Line();
         cursorLine.setStroke(color);
         cursorLine.setStrokeWidth(CURSOR_WIDTH);
+        cursorLine.setVisible(false); // Hide initially
         
         // Create a label for the user ID
         usernameLabel = new Text(userId);
         usernameLabel.setFill(color);
         usernameLabel.setOpacity(1.0); // Full opacity for better visibility
+        usernameLabel.setVisible(false); // Hide initially
         
         // Add the elements to the parent pane
         parent.getChildren().addAll(cursorLine, usernameLabel);
@@ -91,36 +94,41 @@ public class CursorMarker {
      * Updates the visual representation of the cursor.
      */
     public void updateVisuals() {
-        // Try to get the bounds of the cursor position
         try {
             // Make sure the position is valid
             int textLength = textArea.getText().length();
             int safePosition = Math.min(position, textLength);
             
-            // Get caret bounds for positioning
-            Bounds caretBounds = getCaretBoundsAt(safePosition);
-            if (caretBounds != null) {
-                // Position the cursor line
-                double x = caretBounds.getMinX();
-                double y = caretBounds.getMinY();
+            // Get points for cursor position
+            Point2D cursorPoint = getCursorPoint(safePosition);
+            if (cursorPoint != null) {
+                double x = cursorPoint.getX();
+                double y = cursorPoint.getY();
                 
-                cursorLine.setStartX(x);
-                cursorLine.setStartY(y);
-                cursorLine.setEndX(x);
-                cursorLine.setEndY(y + CURSOR_HEIGHT);
+                // Calculate offset from top of textArea (accounting for scrolling)
+                double visibleY = y - textArea.getScrollTop();
+                double visibleX = x;
                 
-                // Position the username label
-                usernameLabel.setLayoutX(x);
-                usernameLabel.setLayoutY(y + LABEL_OFFSET_Y);
-                
-                // Make sure the elements are visible
-                cursorLine.setVisible(true);
-                usernameLabel.setVisible(true);
-                
-                return;
+                // Only show cursor if it's in the visible area of the TextArea
+                if (visibleY >= 0 && visibleY <= textArea.getHeight()) {
+                    // Position the cursor line
+                    cursorLine.setStartX(visibleX);
+                    cursorLine.setStartY(visibleY);
+                    cursorLine.setEndX(visibleX);
+                    cursorLine.setEndY(visibleY + CURSOR_HEIGHT);
+                    
+                    // Position the username label
+                    usernameLabel.setLayoutX(visibleX);
+                    usernameLabel.setLayoutY(visibleY + LABEL_OFFSET_Y);
+                    
+                    // Make sure the elements are visible
+                    cursorLine.setVisible(true);
+                    usernameLabel.setVisible(true);
+                    return;
+                }
             }
             
-            // If we couldn't get specific position, hide the cursor
+            // If we couldn't position cursor or it's out of view, hide it
             cursorLine.setVisible(false);
             usernameLabel.setVisible(false);
         } catch (Exception e) {
@@ -131,27 +139,26 @@ public class CursorMarker {
     }
     
     /**
-     * Gets caret bounds for a specific position.
+     * Gets cursor position point for a specific character position.
      * @param position The character position.
-     * @return The bounds, or null if they couldn't be determined.
+     * @return The point, or null if it couldn't be determined.
      */
-    private Bounds getCaretBoundsAt(int position) {
+    private Point2D getCursorPoint(int position) {
         try {
-            // Save the current caret position and selection
+            // Save the current position
             int originalPosition = textArea.getCaretPosition();
             
-            // Temporarily move the caret to the desired position
+            // Move caret to desired position and wait for layout
             textArea.positionCaret(position);
             
-            // Create a character to use for measuring
-            Text charText = new Text("I");
-            charText.setFont(textArea.getFont());
+            // Get the position of the character at this index
+            // This is a more direct approach to get the actual pixel position
             
-            // Get current line and column for positioning
+            // Calculate the row and column
+            String text = textArea.getText();
             int row = 0;
             int col = 0;
             
-            String text = textArea.getText();
             for (int i = 0; i < position && i < text.length(); i++) {
                 if (text.charAt(i) == '\n') {
                     row++;
@@ -161,21 +168,25 @@ public class CursorMarker {
                 }
             }
             
-            // Estimate position based on character width and line height
+            // Get a sample character to measure dimensions
+            Text charText = new Text("I");
+            charText.setFont(textArea.getFont());
             double charWidth = charText.getBoundsInLocal().getWidth();
-            double lineHeight = charText.getBoundsInLocal().getHeight() * 1.2; // Add some spacing
+            double lineHeight = charText.getBoundsInLocal().getHeight() * 1.2;
             
-            // Calculate coordinates
-            double x = col * charWidth + 5; // Add padding
-            double y = row * lineHeight + 5; // Add padding
+            // Get the top-left corner of the TextArea within the scene
+            Bounds textAreaBounds = textArea.getBoundsInParent();
+            double textAreaX = textAreaBounds.getMinX() + 5; // Left padding
+            double textAreaY = textAreaBounds.getMinY() + 5; // Top padding
             
-            // Create bounds
-            Bounds bounds = new javafx.geometry.BoundingBox(x, y, charWidth, lineHeight);
+            // Calculate cursor position based on row/column
+            double cursorX = textAreaX + (col * charWidth);
+            double cursorY = textAreaY + (row * lineHeight);
             
-            // Restore the original caret position
+            // Restore original position
             textArea.positionCaret(originalPosition);
             
-            return bounds;
+            return new Point2D(cursorX, cursorY);
         } catch (Exception e) {
             return null;
         }

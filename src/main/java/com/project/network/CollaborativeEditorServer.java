@@ -118,6 +118,9 @@ public class CollaborativeEditorServer extends WebSocketServer {
                 case "document_update":
                     handleDocumentUpdate(conn, jsonMessage);
                     break;
+                case "sync_confirmation":
+                    handleSyncConfirmation(conn, jsonMessage);
+                    break;
                 default:
                     System.out.println("Unknown message type: " + type);
             }
@@ -246,23 +249,41 @@ public class CollaborativeEditorServer extends WebSocketServer {
         
         // Sync document content for the new user if there's already content
         if (session.getDocumentContent() != null && !session.getDocumentContent().isEmpty()) {
-            JsonObject syncMsg = new JsonObject();
-            syncMsg.addProperty("type", "document_sync");
-            syncMsg.addProperty("content", session.getDocumentContent());
-            
-            // Send with slight delay to ensure client is ready
+            // Use a separate thread to ensure reliable delivery with multiple attempts
             new Thread(() -> {
                 try {
-                    // Wait a short time to ensure client is ready
+                    // First wait to ensure client is fully connected and ready
                     Thread.sleep(500);
-                    if (conn.isOpen()) {
+                    
+                    // Make up to 3 attempts to send the document content
+                    boolean syncSuccessful = false;
+                    int attempts = 0;
+                    
+                    while (!syncSuccessful && attempts < 3 && conn.isOpen()) {
+                        attempts++;
+                        
+                        // Send document content
+                        JsonObject syncMsg = new JsonObject();
+                        syncMsg.addProperty("type", "document_sync");
+                        syncMsg.addProperty("content", session.getDocumentContent());
+                        syncMsg.addProperty("syncAttempt", attempts);
                         conn.send(gson.toJson(syncMsg));
                         
-                        // Send a confirmation message to verify content sync
-                        JsonObject confirmMsg = new JsonObject();
-                        confirmMsg.addProperty("type", "sync_confirmation");
-                        confirmMsg.addProperty("documentLength", session.getDocumentContent().length());
-                        conn.send(gson.toJson(confirmMsg));
+                        // Send confirmation request and wait for response
+                        JsonObject confirmReqMsg = new JsonObject();
+                        confirmReqMsg.addProperty("type", "sync_confirmation_request");
+                        confirmReqMsg.addProperty("documentLength", session.getDocumentContent().length());
+                        conn.send(gson.toJson(confirmReqMsg));
+                        
+                        // Wait for next attempt if needed
+                        if (attempts < 3) {
+                            Thread.sleep(1000);
+                        }
+                    }
+                    
+                    // Log sync attempt outcome
+                    if (attempts >= 3) {
+                        System.out.println("Warning: Document sync with user " + userId + " may not be complete after " + attempts + " attempts");
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -416,6 +437,41 @@ public class CollaborativeEditorServer extends WebSocketServer {
         }
         
         return code;
+    }
+    
+    /**
+     * Handles a sync confirmation message from a client.
+     */
+    private void handleSyncConfirmation(WebSocket conn, JsonObject message) {
+        String userId = connectionToUserId.get(conn);
+        int receivedLength = message.get("receivedLength").getAsInt();
+        
+        if (userId == null) {
+            return;
+        }
+        
+        EditorSession session = userSessions.get(userId);
+        if (session == null) {
+            return;
+        }
+        
+        // Check if the client has the correct document length
+        int expectedLength = session.getDocumentContent().length();
+        
+        if (receivedLength == expectedLength) {
+            System.out.println("Document sync confirmed for user " + userId + 
+                " (length: " + receivedLength + ")");
+        } else {
+            System.out.println("Document sync mismatch for user " + userId + 
+                " (received: " + receivedLength + ", expected: " + expectedLength + ")");
+            
+            // Re-send the document content if mismatch
+            JsonObject syncMsg = new JsonObject();
+            syncMsg.addProperty("type", "document_sync");
+            syncMsg.addProperty("content", session.getDocumentContent());
+            syncMsg.addProperty("syncRetry", true);
+            conn.send(gson.toJson(syncMsg));
+        }
     }
     
     /**
