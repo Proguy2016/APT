@@ -249,7 +249,25 @@ public class CollaborativeEditorServer extends WebSocketServer {
             JsonObject syncMsg = new JsonObject();
             syncMsg.addProperty("type", "document_sync");
             syncMsg.addProperty("content", session.getDocumentContent());
-            conn.send(gson.toJson(syncMsg));
+            
+            // Send with slight delay to ensure client is ready
+            new Thread(() -> {
+                try {
+                    // Wait a short time to ensure client is ready
+                    Thread.sleep(500);
+                    if (conn.isOpen()) {
+                        conn.send(gson.toJson(syncMsg));
+                        
+                        // Send a confirmation message to verify content sync
+                        JsonObject confirmMsg = new JsonObject();
+                        confirmMsg.addProperty("type", "sync_confirmation");
+                        confirmMsg.addProperty("documentLength", session.getDocumentContent().length());
+                        conn.send(gson.toJson(confirmMsg));
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }).start();
         }
         
         System.out.println("User " + userId + " joined session with code " + sessionCode + " as " + (asEditor ? "editor" : "viewer"));

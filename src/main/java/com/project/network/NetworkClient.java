@@ -324,6 +324,12 @@ public class NetworkClient {
                     handleDocumentSyncOperation(jsonMessage);
                     break;
                     
+                case "sync_confirmation":
+                    // Log that document sync is confirmed
+                    int docLength = jsonMessage.get("documentLength").getAsInt();
+                    System.out.println("Document sync confirmed - document length: " + docLength);
+                    break;
+                    
                 case "error":
                     notifyErrorListeners(jsonMessage.get("message").getAsString());
                     break;

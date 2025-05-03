@@ -190,11 +190,11 @@ public class EditorController {
                 for (String userId : newUsers) {
                     // Add self with "(you)" suffix
                     if (userId.equals(this.userId)) {
-                        users.add(username + " (you)");
-                        userMap.put(userId, username);
+                        users.add((username != null ? username : "You") + " (you)");
+                        userMap.put(userId, username != null ? username : "You");
                     } else {
-                        // For other users, try to get username or use ID as fallback
-                        String displayName = userMap.getOrDefault(userId, "User " + userId.substring(0, 6));
+                        // Try to get username from our map, or use a prettier fallback
+                        String displayName = userMap.getOrDefault(userId, "User " + (userId.length() > 6 ? userId.substring(0, 6) : userId));
                         users.add(displayName);
                     }
                 }
@@ -448,8 +448,11 @@ public class EditorController {
                 // Choose a color for the user (based on user ID hash)
                 Color color = cursorColors[Math.abs(userId.hashCode()) % cursorColors.length];
                 
-                // Create a new cursor marker
-                CursorMarker marker = new CursorMarker(editorContainer, userId, color, editorArea);
+                // Get the username for display
+                String displayName = userMap.getOrDefault(userId, "User " + (userId.length() > 6 ? userId.substring(0, 6) : userId));
+                
+                // Create a new cursor marker with username instead of ID
+                CursorMarker marker = new CursorMarker(editorContainer, displayName, color, editorArea);
                 cursorMarkers.put(userId, marker);
             }
             

@@ -27,7 +27,7 @@ public class CursorMarker {
     
     // Size constants
     private static final double CURSOR_HEIGHT = 16.0;
-    private static final double CURSOR_WIDTH = 1.0; // Thinner line for subtlety
+    private static final double CURSOR_WIDTH = 2.0; // Slightly thicker for better visibility
     private static final double LABEL_OFFSET_Y = -16.0;
     
     private final FadeTransition blinkAnimation;
@@ -50,7 +50,7 @@ public class CursorMarker {
         
         // Add a blinking animation to make the cursor more noticeable but still subtle
         blinkAnimation = new FadeTransition(Duration.millis(800), cursorLine);
-        blinkAnimation.setFromValue(0.8);
+        blinkAnimation.setFromValue(1.0); // Full opacity
         blinkAnimation.setToValue(0.4);
         blinkAnimation.setCycleCount(FadeTransition.INDEFINITE);
         blinkAnimation.setAutoReverse(true);
@@ -69,7 +69,7 @@ public class CursorMarker {
         // Create a label for the user ID
         usernameLabel = new Text(userId);
         usernameLabel.setFill(color);
-        usernameLabel.setOpacity(0.8); // Make username slightly transparent
+        usernameLabel.setOpacity(1.0); // Full opacity for better visibility
         
         // Add the elements to the parent pane
         parent.getChildren().addAll(cursorLine, usernameLabel);
@@ -137,25 +137,40 @@ public class CursorMarker {
      */
     private Bounds getCaretBoundsAt(int position) {
         try {
-            // Save the current caret position
+            // Save the current caret position and selection
             int originalPosition = textArea.getCaretPosition();
             
             // Temporarily move the caret to the desired position
             textArea.positionCaret(position);
             
-            // Get the bounds of the selected character
-            // Since TextArea doesn't have direct getCaretBounds, we need to work around
-            // by creating a dummy Text node with the character at that position
+            // Create a character to use for measuring
+            Text charText = new Text("I");
+            charText.setFont(textArea.getFont());
+            
+            // Get current line and column for positioning
+            int row = 0;
+            int col = 0;
+            
             String text = textArea.getText();
-            if (text.isEmpty() || position >= text.length()) {
-                // Use a space if we're at the end
-                Text dummyText = new Text(" ");
-                return dummyText.getBoundsInLocal();
+            for (int i = 0; i < position && i < text.length(); i++) {
+                if (text.charAt(i) == '\n') {
+                    row++;
+                    col = 0;
+                } else {
+                    col++;
+                }
             }
             
-            // Create a Text node with the character at the position
-            Text dummyText = new Text(String.valueOf(text.charAt(position)));
-            Bounds bounds = dummyText.getBoundsInLocal();
+            // Estimate position based on character width and line height
+            double charWidth = charText.getBoundsInLocal().getWidth();
+            double lineHeight = charText.getBoundsInLocal().getHeight() * 1.2; // Add some spacing
+            
+            // Calculate coordinates
+            double x = col * charWidth + 5; // Add padding
+            double y = row * lineHeight + 5; // Add padding
+            
+            // Create bounds
+            Bounds bounds = new javafx.geometry.BoundingBox(x, y, charWidth, lineHeight);
             
             // Restore the original caret position
             textArea.positionCaret(originalPosition);
