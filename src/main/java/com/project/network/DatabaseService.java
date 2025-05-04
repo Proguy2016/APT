@@ -8,6 +8,7 @@ import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.Updates;
 import org.bson.Document;
 import org.bson.conversions.Bson;
+import org.bson.types.ObjectId;
 import org.mindrot.jbcrypt.BCrypt;
 
 import java.util.ArrayList;
@@ -22,7 +23,7 @@ import java.util.UUID;
  * This implementation can work without MongoDB by using in-memory storage.
  */
 public class DatabaseService {
-    private static final String CONNECTION_STRING = "mongodb://localhost:27017/";
+    private static final String CONNECTION_STRING = "mongodb+srv://youssefshafik04:1gaifqXHyXhxccv2@cluster0.fsx0whh.mongodb.net/?connectTimeoutMS=5000&serverSelectionTimeoutMS=5000";
     private static final String DATABASE_NAME = "collaborative_editor";
     private static final String USERS_COLLECTION = "users";
     private static final String DOCUMENTS_COLLECTION = "documents";
@@ -56,16 +57,61 @@ public class DatabaseService {
      */
     private DatabaseService() {
         try {
+            System.out.println("Attempting to connect to MongoDB...");
+            
+            // Set a shorter connection timeout (5 seconds instead of 30)
             mongoClient = MongoClients.create(CONNECTION_STRING);
+            
+            // Test connection immediately to fail fast
             database = mongoClient.getDatabase(DATABASE_NAME);
+            database.runCommand(new Document("ping", 1));
+            
             usersCollection = database.getCollection(USERS_COLLECTION);
             documentsCollection = database.getCollection(DOCUMENTS_COLLECTION);
+            
             System.out.println("Connected to MongoDB successfully");
+            useInMemoryStorage = false;
         } catch (Exception e) {
             System.err.println("Error connecting to MongoDB: " + e.getMessage());
             System.out.println("Using in-memory storage instead");
+            
+            // Make sure to close any connection that might have been created
+            if (mongoClient != null) {
+                try {
+                    mongoClient.close();
+                } catch (Exception ex) {
+                    // Ignore, we're already in an error state
+                }
+                mongoClient = null;
+            }
+            
             useInMemoryStorage = true;
+            
+            // Create a demo user for easier testing when MongoDB is not available
+            createDemoUser();
         }
+    }
+    
+    /**
+     * Creates a demo user when in-memory storage is active.
+     */
+    private void createDemoUser() {
+        if (!useInMemoryStorage) {
+            return;
+        }
+        
+        String userId = UUID.randomUUID().toString();
+        String username = "demo";
+        String hashedPassword = BCrypt.hashpw("password", BCrypt.gensalt());
+        User user = new User(userId, username, hashedPassword, new Date());
+        userMap.put(userId, user);
+        
+        System.out.println("Created demo user. Username: 'demo', Password: 'password'");
+        
+        // Create a sample document for the demo user
+        String documentId = createDocumentInMemory("Welcome Document", userId);
+        InMemoryDocument document = documentMap.get(documentId);
+        document.content = "Welcome to the collaborative editor!\n\nThis is a sample document created for demonstration purposes.";
     }
     
     /**
@@ -140,7 +186,12 @@ public class DatabaseService {
             
             String hashedPassword = user.getString("password");
             if (BCrypt.checkpw(password, hashedPassword)) {
-                return user.getObjectId("_id").toString();
+                Object idObj = user.get("_id");
+                if (idObj instanceof ObjectId) {
+                    return ((ObjectId) idObj).toString();
+                } else {
+                    return idObj.toString();
+                }
             }
             
             return null;
@@ -194,7 +245,12 @@ public class DatabaseService {
                     .append("updatedAt", new Date());
             
             documentsCollection.insertOne(newDocument);
-            return newDocument.getObjectId("_id").toString();
+            Object idObj = newDocument.get("_id");
+            if (idObj instanceof ObjectId) {
+                return ((ObjectId) idObj).toString();
+            } else {
+                return idObj.toString();
+            }
         } catch (Exception e) {
             System.err.println("Error creating document: " + e.getMessage());
             e.printStackTrace();
@@ -221,7 +277,7 @@ public class DatabaseService {
         }
         
         try {
-            Bson filter = Filters.eq("_id", documentId);
+            Bson filter = Filters.eq("_id", new ObjectId(documentId));
             Bson update = Updates.combine(
                     Updates.set("content", content),
                     Updates.set("updatedAt", new Date())
@@ -259,7 +315,7 @@ public class DatabaseService {
         }
         
         try {
-            Bson filter = Filters.eq("_id", documentId);
+            Bson filter = Filters.eq("_id", new ObjectId(documentId));
             Bson update = Updates.combine(
                     Updates.set("content", content),
                     Updates.set("sessionCode", sessionCode),
@@ -297,7 +353,7 @@ public class DatabaseService {
         }
         
         try {
-            return documentsCollection.find(Filters.eq("_id", documentId)).first();
+            return documentsCollection.find(Filters.eq("_id", new ObjectId(documentId))).first();
         } catch (Exception e) {
             System.err.println("Error getting document: " + e.getMessage());
             e.printStackTrace();
