@@ -34,6 +34,9 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+
 public class EditorController {
     @FXML
     private TextArea editorArea;
@@ -203,49 +206,33 @@ public class EditorController {
     }
     
     private void setupNetworkListeners() {
-        // Listen for operations from the network
-        networkClient.addOperationListener(operation -> {
-            Platform.runLater(() -> {
-                handleRemoteOperation(operation);
-            });
-        });
+        // Add operation listener
+        networkClient.addOperationListener(this::handleRemoteOperation);
         
-        // Listen for presence updates
-        networkClient.addPresenceListener(newUsers -> {
+        // Add presence listener
+        networkClient.addPresenceListener(this::updateUserList);
+        
+        // Add error listener
+        networkClient.addErrorListener(this::updateStatus);
+        
+        // Add code listener
+        networkClient.addCodeListener(codes -> {
             Platform.runLater(() -> {
-                users.clear();
+                // Update the UI fields
+                editorCodeField.setText(codes.getEditorCode());
+                viewerCodeField.setText(codes.getViewerCode());
                 
-                // Display usernames instead of user IDs
-                for (String userId : newUsers) {
-                    // Add self with "(you)" suffix
-                    if (userId.equals(this.userId)) {
-                        users.add((username != null ? username : "You") + " (you)");
-                        userMap.put(userId, username != null ? username : "You");
+                // Save the codes with the document in the database
+                if (documentId != null) {
+                    boolean saved = DatabaseService.getInstance().updateDocumentWithSession(
+                        documentId, document.getText(), codes.getEditorCode(), codes.getViewerCode());
+                    
+                    if (saved) {
+                        System.out.println("Session codes saved with document ID: " + documentId);
                     } else {
-                        // Try to get username from our map, or use a prettier fallback
-                        String displayName = userMap.getOrDefault(userId, "User " + (userId.length() > 6 ? userId.substring(0, 6) : userId));
-                        users.add(displayName);
+                        System.err.println("Failed to save session codes with document ID: " + documentId);
                     }
                 }
-                
-                // Update cursor markers
-                updateCursorMarkers(newUsers);
-            });
-        });
-        
-        // Listen for error messages
-        networkClient.addErrorListener(error -> {
-            Platform.runLater(() -> {
-                updateStatus("Error: " + error);
-            });
-        });
-        
-        // Listen for code updates
-        networkClient.addCodeListener(codePair -> {
-            Platform.runLater(() -> {
-                editorCodeField.setText(codePair.getEditorCode());
-                viewerCodeField.setText(codePair.getViewerCode());
-                updateStatus("Generated sharing codes");
             });
         });
     }
@@ -395,45 +382,67 @@ public class EditorController {
     }
     
     private void handleRemoteOperation(Operation operation) {
-        switch (operation.getType()) {
-            case INSERT:
-                CRDTCharacter character = operation.getCharacter();
-                document.remoteInsert(character);
-                break;
-            case DELETE:
-                Position position = operation.getPosition();
-                document.remoteDelete(position);
-                break;
-            case CURSOR_MOVE:
-                updateRemoteCursor(operation.getUserId(), operation.getCursorPosition());
-                break;
-            case DOCUMENT_SYNC:
-                handleDocumentSync(operation.getDocumentContent());
-                break;
-            case GET_DOCUMENT_LENGTH:
-                // This is a request to get the current document length (for sync confirmation)
-                // We just need to set the document length on the operation object
-                operation.setDocumentLength(document != null ? document.getText().length() : 0);
-                break;
-            case REQUEST_DOCUMENT_RESYNC:
-                // Force resend the current document content to the server
-                if (document != null && document.getText().length() > 0) {
-                    networkClient.sendDocumentUpdate(document.getText());
-                }
-                break;
-            case PRESENCE:
-                // This is handled by the presence listener
-                break;
-        }
-        
-        // Only update the text if it's an INSERT or DELETE operation
-        if (operation.getType() == Operation.Type.INSERT || operation.getType() == Operation.Type.DELETE) {
-            // Update the text area with the document's current text
-            updateEditorText(document.getText());
+        // For operations that modify the document, synchronize on the document
+        if (operation.getType() == Operation.Type.INSERT || 
+            operation.getType() == Operation.Type.DELETE || 
+            operation.getType() == Operation.Type.DOCUMENT_SYNC) {
             
-            // Also update the server with the complete document text occasionally
-            if (Math.random() < 0.1) { // 10% chance to send document update
-                networkClient.sendDocumentUpdate(document.getText());
+            synchronized (document) {
+                switch (operation.getType()) {
+                    case INSERT:
+                        CRDTCharacter character = operation.getCharacter();
+                        document.remoteInsert(character);
+                        break;
+                    case DELETE:
+                        Position position = operation.getPosition();
+                        document.remoteDelete(position);
+                        break;
+                    case DOCUMENT_SYNC:
+                        handleDocumentSync(operation.getDocumentContent());
+                        return; // Skip the text update since handleDocumentSync does it
+                    default:
+                        // Should not happen
+                        break;
+                }
+                
+                // Update the text area with the document's current text
+                final String documentText = document.getText();
+                Platform.runLater(() -> updateEditorText(documentText));
+                
+                // Also update the server with the complete document text occasionally
+                if (Math.random() < 0.1) { // 10% chance to send document update
+                    networkClient.sendDocumentUpdate(documentText);
+                }
+            }
+        } else {
+            // For non-document operations, no need to synchronize
+            switch (operation.getType()) {
+                case CURSOR_MOVE:
+                    updateRemoteCursor(operation.getUserId(), operation.getCursorPosition());
+                    break;
+                case GET_DOCUMENT_LENGTH:
+                    // This is a request to get the current document length (for sync confirmation)
+                    synchronized (document) {
+                        operation.setDocumentLength(document != null ? document.getText().length() : 0);
+                    }
+                    break;
+                case REQUEST_DOCUMENT_RESYNC:
+                    // Force resend the current document content to the server
+                    if (document != null) {
+                        synchronized (document) {
+                            final String text = document.getText();
+                            if (text.length() > 0) {
+                                networkClient.sendDocumentUpdate(text);
+                            }
+                        }
+                    }
+                    break;
+                case PRESENCE:
+                    // This is handled by the presence listener
+                    break;
+                default:
+                    System.err.println("Unknown operation type: " + operation.getType());
+                    break;
             }
         }
     }
@@ -444,27 +453,43 @@ public class EditorController {
         }
         
         try {
-            // Reset the document
-            document = new CRDTDocument(userId);
-            
-            // Reset the UI first to show the sync is happening
-            updateEditorText("");
-            
-            // Insert each character
-            if (!content.isEmpty()) {
-                // Insert all characters at once rather than one by one
-                for (int i = 0; i < content.length(); i++) {
-                    document.localInsert(i, content.charAt(i));
-                }
-            
-                // Update the UI
-                updateEditorText(content);
+            // Acquire lock for document sync
+            synchronized (document) {
+                // Reset the document
+                document = new CRDTDocument(userId);
                 
-                // Log successful sync
-                System.out.println("Document synchronized with " + content.length() + " characters");
-                updateStatus("Document synchronized successfully");
-            } else {
-                updateStatus("Synchronized empty document");
+                // Reset the UI first to show the sync is happening
+                updateEditorText("");
+                
+                // Insert each character
+                if (!content.isEmpty()) {
+                    // Insert all characters at once rather than one by one
+                    for (int i = 0; i < content.length(); i++) {
+                        document.localInsert(i, content.charAt(i));
+                    }
+                
+                    // Update the UI
+                    updateEditorText(content);
+                    
+                    // Log successful sync
+                    System.out.println("Document synchronized with " + content.length() + " characters");
+                    updateStatus("Document synchronized successfully");
+                    
+                    // Remove all cursor markers and recreate them
+                    Platform.runLater(() -> {
+                        for (CursorMarker marker : new ArrayList<>(cursorMarkers.values())) {
+                            cleanupCursorMarker(marker);
+                        }
+                        cursorMarkers.clear();
+                        
+                        // Update cursor markers for current users
+                        if (userMap != null && !userMap.isEmpty()) {
+                            updateCursorMarkers(new ArrayList<>(userMap.keySet()));
+                        }
+                    });
+                } else {
+                    updateStatus("Synchronized empty document");
+                }
             }
         } catch (Exception e) {
             System.err.println("Error during document sync: " + e.getMessage());
@@ -496,60 +521,157 @@ public class EditorController {
         }
     }
     
-    private void updateCursorMarkers(List<String> userIds) {
-        // Create a set of all existing markers
-        Set<String> existingMarkers = new HashSet<>(cursorMarkers.keySet());
-        
-        // Add new markers for new users
-        for (String userId : userIds) {
-            if (!userId.equals(this.userId) && !cursorMarkers.containsKey(userId)) {
-                // Choose a color for the user (based on user ID hash)
-                Color color = cursorColors[Math.abs(userId.hashCode()) % cursorColors.length];
-                
-                // Get the username for display
-                String displayName = userMap.getOrDefault(userId, "User " + (userId.length() > 6 ? userId.substring(0, 6) : userId));
-                
-                // Create a new cursor marker with username instead of ID
-                CursorMarker marker = new CursorMarker(editorContainer, displayName, color, editorArea);
-                cursorMarkers.put(userId, marker);
+    private void updateUserList(Map<String, String> userMap) {
+        Platform.runLater(() -> {
+            users.clear();
+            
+            // Store all users for cursor markers
+            for (Map.Entry<String, String> entry : userMap.entrySet()) {
+                if (!entry.getKey().equals(userId)) {
+                    users.add(entry.getValue());
+                }
+                // Update our internal user map
+                this.userMap.put(entry.getKey(), entry.getValue());
             }
             
-            // Remove from the set of existing markers to keep track of removed users
-            existingMarkers.remove(userId);
-        }
-        
-        // Remove markers for users who have left
-        for (String userId : existingMarkers) {
-            CursorMarker marker = cursorMarkers.get(userId);
-            if (marker != null) {
-                marker.remove();
-                marker.dispose();
-                cursorMarkers.remove(userId);
-            }
-        }
+            // Update cursor markers for all users
+            updateCursorMarkers(new ArrayList<>(userMap.keySet()));
+        });
     }
     
-    private void updateRemoteCursor(String userId, int position) {
-        if (userId.equals(this.userId)) {
-            // Don't update our own cursor
-            return;
+    private void updateCursorMarkers(List<String> userIds) {
+        Platform.runLater(() -> {
+            // Remove old cursors for users no longer present
+            Set<String> currentUsers = new HashSet<>(userIds);
+            Set<String> markersToRemove = new HashSet<>();
+            
+            for (String markerId : cursorMarkers.keySet()) {
+                if (!currentUsers.contains(markerId)) {
+                    markersToRemove.add(markerId);
+                }
+            }
+            
+            for (String markerId : markersToRemove) {
+                CursorMarker marker = cursorMarkers.remove(markerId);
+                cleanupCursorMarker(marker);
+            }
+            
+            // Assign colors to new users
+            int colorIndex = 0;
+            for (String userId : userIds) {
+                if (!userId.equals(this.userId) && !cursorMarkers.containsKey(userId)) {
+                    CursorMarker marker = new CursorMarker(getUsernameForId(userId), cursorColors[colorIndex % cursorColors.length]);
+                    cursorMarkers.put(userId, marker);
+                    editorContainer.getChildren().add(marker);
+                    
+                    colorIndex++;
+                }
+            }
+        });
+    }
+    
+    /**
+     * Gets the bounds of the caret in the text area.
+     * This is a utility method as TextArea doesn't directly provide this.
+     * @return The bounds of the caret, or null if not available
+     */
+    private Bounds getCaretBounds() {
+        // Get current caret position
+        int caretPosition = editorArea.getCaretPosition();
+        
+        // Calculate line and column
+        int lineNo = 0;
+        int colNo = 0;
+        int pos = 0;
+        
+        // Find the line number and column position
+        for (CharSequence paragraph : editorArea.getParagraphs()) {
+            int paragraphLength = paragraph.length() + 1; // +1 for newline
+            if (pos + paragraphLength > caretPosition) {
+                colNo = caretPosition - pos;
+                break;
+            }
+            pos += paragraphLength;
+            lineNo++;
         }
         
-        Platform.runLater(() -> {
-            try {
+        // Use fixed width for consistent positioning across clients
+        double charWidth = 8.0; // Width of a single character in pixels
+        double lineHeight = 18.0; // Height of a line in pixels
+        
+        // Calculate position
+        double x = colNo * charWidth;
+        double y = lineNo * lineHeight;
+        
+        // Return a bounds object
+        return new javafx.geometry.BoundingBox(x, y, 1, lineHeight);
+    }
+    
+    /**
+     * Updates a remote cursor position.
+     * @param userId The user ID.
+     * @param position The cursor position.
+     */
+    private void updateRemoteCursor(String userId, int position) {
+        if (position < 0) {
+            // Negative position means cursor should be removed
+            Platform.runLater(() -> {
                 CursorMarker marker = cursorMarkers.get(userId);
                 if (marker != null) {
-                    if (position >= 0) {
-                        marker.updatePosition(position);
-                    } else {
-                        // Position -1 indicates cursor removal
-                        marker.remove();
-                        marker.dispose();
-                        cursorMarkers.remove(userId);
+                    cleanupCursorMarker(marker);
+                }
+            });
+            return;
+        }
+
+        // Using runLater for thread safety
+        Platform.runLater(() -> {
+            try {
+                // Ensure we have a marker for this user
+                CursorMarker marker = cursorMarkers.get(userId);
+                if (marker == null) {
+                    // This shouldn't happen normally as markers are created in updateCursorMarkers
+                    // But if it does, we'll create a marker with a default color
+                    String username = getUsernameForId(userId);
+                    Color color = cursorColors[0]; // Default to first color
+                    marker = new CursorMarker(username, color);
+                    cursorMarkers.put(userId, marker);
+                    editorContainer.getChildren().add(marker);
+                }
+        
+                // Calculate cursor position directly from the position index
+                if (position <= editorArea.getLength()) {
+                    // Calculate line and column for this position
+                    int lineNo = 0;
+                    int colNo = 0;
+                    int pos = 0;
+                    
+                    // Find the line number and column position
+                    for (CharSequence paragraph : editorArea.getParagraphs()) {
+                        int paragraphLength = paragraph.length() + 1; // +1 for newline
+                        if (pos + paragraphLength > position) {
+                            colNo = position - pos;
+                            break;
+                        }
+                        pos += paragraphLength;
+                        lineNo++;
                     }
+                    
+                    // Use fixed width for consistent positioning across clients
+                    double charWidth = 8.0; // Width of a single character in pixels
+                    double lineHeight = 18.0; // Height of a line in pixels
+                    
+                    // Calculate position
+                    double x = colNo * charWidth;
+                    double y = lineNo * lineHeight;
+                    
+                    // Create bounds and update marker
+                    Bounds bounds = new javafx.geometry.BoundingBox(x, y, 1, lineHeight);
+                    marker.updatePosition(bounds);
                 }
             } catch (Exception e) {
-                System.err.println("Error updating cursor for user " + userId + ": " + e.getMessage());
+                System.err.println("Error updating cursor: " + e.getMessage());
+                e.printStackTrace();
             }
         });
     }
@@ -673,6 +795,10 @@ public class EditorController {
         }
     }
     
+    /**
+     * Handles undo action.
+     * @param event The action event.
+     */
     @FXML
     private void handleUndo(ActionEvent event) {
         if (!isEditor) {
@@ -680,16 +806,70 @@ public class EditorController {
             return;
         }
         
-        boolean undone = document.undo();
-        if (undone) {
-            // Update the text area with the document's current text
-            updateEditorText(document.getText());
-            updateStatus("Undo operation");
-        } else {
-            updateStatus("Nothing to undo");
+        if (document != null) {
+            // Get the operation that will be undone
+            Operation undoOperation = document.peekUndo();
+            if (undoOperation == null) {
+                updateStatus("Nothing to undo");
+                return;
+            }
+
+            // Store the original content
+            String oldContent = document.getText();
+            
+            // Perform the undo
+            boolean undone = document.undo();
+            if (undone) {
+                // Get latest text
+                String newContent = document.getText();
+                
+                // Update the UI
+                updateEditorText(newContent);
+                
+                // Now explicitly send the exact operation that was undone
+                // This way it will be processed exactly like a regular insert or delete
+                if (undoOperation.getType() == Operation.Type.INSERT) {
+                    // Undoing an insert means we need to delete that character
+                    if (networkClient != null && undoOperation.getPosition() != null) {
+                        networkClient.sendDelete(undoOperation.getPosition());
+                    }
+                } else if (undoOperation.getType() == Operation.Type.DELETE) {
+                    // Undoing a delete means we need to insert that character
+                    if (networkClient != null && undoOperation.getCharacter() != null) {
+                        networkClient.sendInsert(undoOperation.getCharacter());
+                    }
+                }
+                
+                // Also send a backup full document update with high priority
+                if (networkClient != null && networkClient.getWebSocketClient() != null) {
+                    try {
+                        // Create a specialized message with HIGH_PRIORITY
+                        JsonObject message = new JsonObject();
+                        message.addProperty("type", "instant_document_update");
+                        message.addProperty("userId", userId);
+                        message.addProperty("username", username);
+                        message.addProperty("content", newContent);
+                        message.addProperty("operation", "undo");
+                        message.addProperty("highPriority", true);
+                        message.addProperty("timestamp", System.currentTimeMillis());
+                        
+                        networkClient.getWebSocketClient().send(new Gson().toJson(message));
+                    } catch (Exception e) {
+                        System.err.println("Error sending undo sync: " + e.getMessage());
+                    }
+                }
+                
+                updateStatus("Undo operation");
+            } else {
+                updateStatus("Nothing to undo");
+            }
         }
     }
     
+    /**
+     * Handles redo action.
+     * @param event The action event.
+     */
     @FXML
     private void handleRedo(ActionEvent event) {
         if (!isEditor) {
@@ -697,13 +877,63 @@ public class EditorController {
             return;
         }
         
-        boolean redone = document.redo();
-        if (redone) {
-            // Update the text area with the document's current text
-            updateEditorText(document.getText());
-            updateStatus("Redo operation");
-        } else {
-            updateStatus("Nothing to redo");
+        if (document != null) {
+            // Get the operation that will be redone
+            Operation redoOperation = document.peekRedo();
+            if (redoOperation == null) {
+                updateStatus("Nothing to redo");
+                return;
+            }
+
+            // Store the original content
+            String oldContent = document.getText();
+            
+            // Perform the redo
+            boolean redone = document.redo();
+            if (redone) {
+                // Get latest text
+                String newContent = document.getText();
+                
+                // Update the UI
+                updateEditorText(newContent);
+                
+                // Now explicitly send the exact operation that was redone
+                // This way it will be processed exactly like a regular insert or delete
+                if (redoOperation.getType() == Operation.Type.INSERT) {
+                    // Redoing an insert means we need to insert that character
+                    if (networkClient != null && redoOperation.getCharacter() != null) {
+                        networkClient.sendInsert(redoOperation.getCharacter());
+                    }
+                } else if (redoOperation.getType() == Operation.Type.DELETE) {
+                    // Redoing a delete means we need to delete that character
+                    if (networkClient != null && redoOperation.getPosition() != null) {
+                        networkClient.sendDelete(redoOperation.getPosition());
+                    }
+                }
+                
+                // Also send a backup full document update with high priority
+                if (networkClient != null && networkClient.getWebSocketClient() != null) {
+                    try {
+                        // Create a specialized message with HIGH_PRIORITY
+                        JsonObject message = new JsonObject();
+                        message.addProperty("type", "instant_document_update");
+                        message.addProperty("userId", userId);
+                        message.addProperty("username", username);
+                        message.addProperty("content", newContent);
+                        message.addProperty("operation", "redo");
+                        message.addProperty("highPriority", true);
+                        message.addProperty("timestamp", System.currentTimeMillis());
+                        
+                        networkClient.getWebSocketClient().send(new Gson().toJson(message));
+                    } catch (Exception e) {
+                        System.err.println("Error sending redo sync: " + e.getMessage());
+                    }
+                }
+                
+                updateStatus("Redo operation");
+            } else {
+                updateStatus("Nothing to redo");
+            }
         }
     }
     
@@ -714,6 +944,27 @@ public class EditorController {
             return;
         }
         
+        // First check if we already have codes in the UI fields
+        String existingEditorCode = editorCodeField.getText();
+        String existingViewerCode = viewerCodeField.getText();
+        
+        if (existingEditorCode != null && !existingEditorCode.isEmpty() &&
+            existingViewerCode != null && !existingViewerCode.isEmpty()) {
+            // We already have codes, just save them with the document
+            if (documentId != null) {
+                boolean saved = DatabaseService.getInstance().updateDocumentWithSession(
+                    documentId, document.getText(), existingEditorCode, existingViewerCode);
+                
+                if (saved) {
+                    updateStatus("Session codes saved with document");
+                } else {
+                    updateStatus("Failed to save session codes");
+                }
+            }
+            return;
+        }
+        
+        // Request new codes from the server
         networkClient.requestCodes();
     }
     
@@ -737,10 +988,9 @@ public class EditorController {
                 updateEditorText(""); // Clear editor
                 document = new CRDTDocument(userId); // Reset document
                 
-                // Remove all cursor markers
+                // Clear existing cursor markers
                 for (CursorMarker marker : new ArrayList<>(cursorMarkers.values())) {
-                    marker.remove();
-                    marker.dispose();
+                    cleanupCursorMarker(marker);
                 }
                 cursorMarkers.clear();
                 
@@ -811,25 +1061,14 @@ public class EditorController {
     
     @FXML
     private void handleExit(ActionEvent event) {
-        // Process any pending batches
-        processBatchInserts();
-        
         // Save document before exiting
         saveDocument();
         
-        // Clean up resources
-        if (autoSaveTimer != null) {
-            autoSaveTimer.cancel();
+        // Clean up cursor markers
+        for (CursorMarker marker : new ArrayList<>(cursorMarkers.values())) {
+            cleanupCursorMarker(marker);
         }
-        
-        if (batchTimer != null) {
-            batchTimer.cancel();
-        }
-        
-        // Dispose of cursor markers
-        for (CursorMarker marker : cursorMarkers.values()) {
-            marker.dispose();
-        }
+        cursorMarkers.clear();
         
         // Disconnect from network
         if (networkClient != null) {
@@ -857,7 +1096,11 @@ public class EditorController {
     }
     
     private void updateStatus(String message) {
-        statusLabel.setText(message);
+        if (Platform.isFxApplicationThread()) {
+            statusLabel.setText(message);
+        } else {
+            Platform.runLater(() -> statusLabel.setText(message));
+        }
     }
     
     @FXML
@@ -902,43 +1145,63 @@ public class EditorController {
             
             updateStatus("Loading document: " + documentTitle + "...");
             
-            org.bson.Document doc = DatabaseService.getInstance().getDocument(documentId);
+            // Make sure document ID is valid
+            if (documentId == null || documentId.isEmpty()) {
+                updateStatus("Invalid document ID");
+                return;
+            }
+            
+            org.bson.Document doc = null;
+            try {
+                doc = DatabaseService.getInstance().getDocument(documentId);
+            } catch (Exception e) {
+                System.err.println("Database error: " + e.getMessage());
+                e.printStackTrace();
+                updateStatus("Error connecting to database. Using empty document.");
+                return;
+            }
+            
             if (doc != null) {
-                String content = doc.getString("content");
-                
-                // Check for existing session
-                String existingSessionCode = null;
+                String content = null;
                 try {
-                    existingSessionCode = doc.getString("sessionCode");
+                    content = doc.getString("content");
                 } catch (Exception e) {
-                    System.err.println("Error reading session code: " + e.getMessage());
+                    System.err.println("Error reading document content: " + e.getMessage());
+                    updateStatus("Error reading document content. Using empty document.");
+                    return;
                 }
                 
-                // If this document has an existing session, join that session
-                if (existingSessionCode != null && !existingSessionCode.isEmpty()) {
+                // Check for existing session codes
+                String existingEditorCode = null;
+                String existingViewerCode = null;
+                try {
+                    existingEditorCode = doc.getString("editorCode");
+                    existingViewerCode = doc.getString("viewerCode");
+                } catch (Exception e) {
+                    System.err.println("Error reading session codes: " + e.getMessage());
+                }
+                
+                // If at least editor code exists, use it
+                if (existingEditorCode != null && !existingEditorCode.isEmpty()) {
                     try {
-                        updateStatus("Joining existing session: " + existingSessionCode);
+                        updateStatus("Using existing session: " + existingEditorCode);
                         
-                        // Join the existing session as an editor
-                        networkClient.joinSession(existingSessionCode, true);
-                        isEditor = true;
-                        
-                        // Update the editor code field
-                        editorCodeField.setText(existingSessionCode);
-                        
-                        // Wait for the session join to complete and content sync
-                        try {
-                            Thread.sleep(500);
-                            
-                            // Force a document sync request after joining
-                            Operation requestResyncOperation = 
-                                new Operation(Operation.Type.REQUEST_DOCUMENT_RESYNC, null, null, userId, -1);
-                            handleRemoteOperation(requestResyncOperation);
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
+                        // Set the codes in the UI
+                        editorCodeField.setText(existingEditorCode);
+                        if (existingViewerCode != null && !existingViewerCode.isEmpty()) {
+                            viewerCodeField.setText(existingViewerCode);
                         }
                         
-                        updateStatus("Joined existing document session: " + existingSessionCode);
+                        // Join the existing session as an editor
+                        networkClient.joinSession(existingEditorCode, true);
+                        isEditor = true;
+                        
+                        // Request document sync after joining
+                        Operation requestResyncOperation = 
+                            new Operation(Operation.Type.REQUEST_DOCUMENT_RESYNC, null, null, userId, -1);
+                        handleRemoteOperation(requestResyncOperation);
+                        
+                        updateStatus("Joined existing document session: " + existingEditorCode);
                         return; // Content will be synced through the session
                     } catch (Exception e) {
                         System.err.println("Error joining existing session: " + e.getMessage());
@@ -950,21 +1213,42 @@ public class EditorController {
                 if (content != null && !content.isEmpty()) {
                     updateStatus("Loading document content...");
                     
-                    // Insert the content character by character
-                    for (int i = 0; i < content.length(); i++) {
-                        document.localInsert(i, content.charAt(i));
+                    try {
+                        // Insert the content character by character
+                        for (int i = 0; i < content.length(); i++) {
+                            document.localInsert(i, content.charAt(i));
+                        }
+                        
+                        // Update the text area
+                        updateEditorText(content);
+                        
+                        // Explicitly send document update to sync with server
+                        networkClient.sendDocumentUpdate(content);
+                        
+                        // If no session codes exist, generate new ones for this document
+                        if ((existingEditorCode == null || existingEditorCode.isEmpty()) &&
+                            (existingViewerCode == null || existingViewerCode.isEmpty())) {
+                            // Request new codes from server (will be saved when received)
+                            networkClient.requestCodes();
+                        }
+                        
+                        updateStatus("Loaded document: " + documentTitle);
+                    } catch (Exception e) {
+                        System.err.println("Error inserting document content: " + e.getMessage());
+                        e.printStackTrace();
+                        updateStatus("Error loading document content. Using empty document.");
                     }
-                    
-                    // Update the text area
-                    updateEditorText(content);
-                    
-                    // Explicitly send document update to sync with server
-                    networkClient.sendDocumentUpdate(content);
-                    
-                    updateStatus("Loaded document: " + documentTitle);
                 } else {
                     // Empty document
                     updateEditorText("");
+                    
+                    // If no session codes exist, generate new ones for this document
+                    if ((existingEditorCode == null || existingEditorCode.isEmpty()) &&
+                        (existingViewerCode == null || existingViewerCode.isEmpty())) {
+                        // Request new codes from server (will be saved when received)
+                        networkClient.requestCodes();
+                    }
+                    
                     updateStatus("Loaded empty document: " + documentTitle);
                 }
             } else {
@@ -994,10 +1278,9 @@ public class EditorController {
             editorCodeField.setText("");
             viewerCodeField.setText("");
             
-            // Remove all cursor markers
-            for (CursorMarker marker : cursorMarkers.values()) {
-                marker.remove();
-                marker.dispose();
+            // Clear cursor markers
+            for (CursorMarker marker : new ArrayList<>(cursorMarkers.values())) {
+                cleanupCursorMarker(marker);
             }
             cursorMarkers.clear();
             
@@ -1051,13 +1334,21 @@ public class EditorController {
         if (documentId != null) {
             String content = document.getText();
             
-            // Get the session code if we're in one
-            String sessionCode = "";
-            if (editorCodeField.getText() != null && !editorCodeField.getText().isEmpty()) {
-                sessionCode = editorCodeField.getText();
+            // Get the editor and viewer codes
+            String editorCode = editorCodeField.getText();
+            String viewerCode = viewerCodeField.getText();
+            
+            boolean saved = false;
+            if (editorCode != null && !editorCode.isEmpty() && 
+                viewerCode != null && !viewerCode.isEmpty()) {
+                // Save with both codes
+                saved = DatabaseService.getInstance().updateDocumentWithSession(
+                    documentId, content, editorCode, viewerCode);
+            } else {
+                // Legacy save method if codes are missing
+                saved = DatabaseService.getInstance().updateDocument(documentId, content);
             }
             
-            boolean saved = DatabaseService.getInstance().updateDocumentWithSession(documentId, content, sessionCode);
             if (saved) {
                 // Also update the server with the complete document
                 networkClient.sendDocumentUpdate(content);
@@ -1092,6 +1383,24 @@ public class EditorController {
         } catch (Exception e) {
             updateStatus("Error saving document: " + e.getMessage());
             e.printStackTrace();
+        }
+    }
+    
+    /**
+     * Get the username for a given user ID
+     * @param userId The user ID
+     * @return The username or a shortened user ID if username not found
+     */
+    private String getUsernameForId(String userId) {
+        String username = userMap.get(userId);
+        return username != null ? username : "User " + userId.substring(0, 4);
+    }
+    
+    // Fix for CursorMarker in updateCursorMarkers
+    private void cleanupCursorMarker(CursorMarker marker) {
+        if (marker != null) {
+            marker.setVisible(false);
+            editorContainer.getChildren().remove(marker);
         }
     }
 } 

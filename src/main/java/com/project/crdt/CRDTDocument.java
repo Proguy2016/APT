@@ -19,7 +19,7 @@ public class CRDTDocument {
     // History for undo/redo operations
     private final Deque<Operation> history;
     private final Deque<Operation> redoStack;
-    private static final int MAX_HISTORY_SIZE = 3;
+    private static final int MAX_HISTORY_SIZE = 50;
     
     /**
      * Creates a new CRDT document.
@@ -304,5 +304,73 @@ public class CRDTDocument {
         public CRDTCharacter getCharacter() {
             return character;
         }
+    }
+    
+    /**
+     * Gets the last operation (for undo tracking).
+     * @return The last operation, or null if the history is empty.
+     */
+    public Operation getLastOperation() {
+        return history.isEmpty() ? null : history.peek();
+    }
+    
+    /**
+     * Gets the last undone operation (for redo tracking).
+     * @return The last undone operation, or null if there are no undone operations.
+     */
+    public Operation getLastUndoneOperation() {
+        return redoStack.isEmpty() ? null : redoStack.peek();
+    }
+    
+    /**
+     * Peeks at the next operation that would be undone.
+     * @return The next operation to undo, or null if there are no operations to undo.
+     */
+    public com.project.network.Operation peekUndo() {
+        if (history.isEmpty()) {
+            return null;
+        }
+        
+        Operation internalOp = history.peek();
+        if (internalOp == null) {
+            return null;
+        }
+        
+        // Convert internal Operation to network Operation
+        return new com.project.network.Operation(
+            internalOp.getType() == OperationType.INSERT ? 
+                com.project.network.Operation.Type.INSERT : 
+                com.project.network.Operation.Type.DELETE,
+            internalOp.getCharacter(),
+            internalOp.getCharacter().getPosition(),
+            this.siteId,
+            -1
+        );
+    }
+    
+    /**
+     * Peeks at the next operation that would be redone.
+     * @return The next operation to redo, or null if there are no operations to redo.
+     */
+    public com.project.network.Operation peekRedo() {
+        if (redoStack.isEmpty()) {
+            return null;
+        }
+        
+        Operation internalOp = redoStack.peek();
+        if (internalOp == null) {
+            return null;
+        }
+        
+        // Convert internal Operation to network Operation
+        return new com.project.network.Operation(
+            internalOp.getType() == OperationType.INSERT ? 
+                com.project.network.Operation.Type.INSERT : 
+                com.project.network.Operation.Type.DELETE,
+            internalOp.getCharacter(),
+            internalOp.getCharacter().getPosition(),
+            this.siteId,
+            -1
+        );
     }
 } 

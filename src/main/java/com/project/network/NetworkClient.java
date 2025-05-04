@@ -10,11 +10,13 @@ import org.java_websocket.handshake.ServerHandshake;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
+import javafx.application.Platform;
 
 /**
  * A WebSocket client for handling communication with the server.
@@ -23,11 +25,12 @@ public class NetworkClient {
     private static final String DEFAULT_SERVER_URI = "ws://localhost:8887";
     
     private final String userId;
+    private final String username;
     private WebSocketClient webSocketClient;
     private final Gson gson = new Gson();
     
     private final List<Consumer<Operation>> operationListeners = new ArrayList<>();
-    private final List<Consumer<List<String>>> presenceListeners = new ArrayList<>();
+    private final List<Consumer<Map<String, String>>> presenceListeners = new ArrayList<>();
     private final List<Consumer<String>> errorListeners = new ArrayList<>();
     private final List<Consumer<CodePair>> codeListeners = new ArrayList<>();
     
@@ -46,8 +49,22 @@ public class NetworkClient {
     
     private boolean connected = false;
     
+    /**
+     * Returns the underlying WebSocketClient instance.
+     * @return The WebSocketClient instance
+     */
+    public WebSocketClient getWebSocketClient() {
+        return webSocketClient;
+    }
+    
     public NetworkClient(String userId) {
         this.userId = userId;
+        this.username = "User " + userId.substring(0, 4);
+    }
+    
+    public NetworkClient(String userId, String username) {
+        this.userId = userId;
+        this.username = username != null ? username : "User " + userId.substring(0, 4);
     }
     
     /**
@@ -67,6 +84,7 @@ public class NetworkClient {
                     JsonObject message = new JsonObject();
                     message.addProperty("type", "register");
                     message.addProperty("userId", userId);
+                    message.addProperty("username", username);
                     send(gson.toJson(message));
                 }
                 
@@ -297,11 +315,52 @@ public class NetworkClient {
                 case "session_joined":
                     boolean asEditor = jsonMessage.get("asEditor").getAsBoolean();
                     System.out.println("Joined session as " + (asEditor ? "editor" : "viewer"));
+                    
+                    // After joining, immediately send our username to help other clients know who we are
+                    JsonObject usernameMessage = new JsonObject();
+                    usernameMessage.addProperty("type", "update_username");
+                    usernameMessage.addProperty("userId", userId);
+                    usernameMessage.addProperty("username", username);
+                    webSocketClient.send(gson.toJson(usernameMessage));
                     break;
                     
                 case "presence":
-                    List<String> users = gson.fromJson(jsonMessage.get("users"), List.class);
-                    notifyPresenceListeners(users);
+                    // Handle legacy server that sends only a list of user IDs
+                    if (jsonMessage.has("users")) {
+                        if (jsonMessage.get("users").isJsonArray()) {
+                            // Old format: just a list of user IDs
+                            List<String> userIds = gson.fromJson(jsonMessage.get("users"), List.class);
+                            
+                            // Convert to a map for our new interface
+                            Map<String, String> userMap = new HashMap<>();
+                            for (String id : userIds) {
+                                // Use the username if we know it, otherwise use a generic name
+                                userMap.put(id, username != null && id.equals(userId) ? 
+                                              username : "User " + id.substring(0, Math.min(4, id.length())));
+                            }
+                            
+                            notifyPresenceListeners(userMap);
+                        } else {
+                            // New format: a map of user IDs to usernames
+                            Map<String, String> userMap = gson.fromJson(jsonMessage.get("users"), Map.class);
+                            notifyPresenceListeners(userMap);
+                        }
+                    }
+                    break;
+                    
+                case "update_username":
+                    // Someone updated their username, broadcast to all clients
+                    if (jsonMessage.has("userId") && jsonMessage.has("username")) {
+                        String updatedUserId = jsonMessage.get("userId").getAsString();
+                        String updatedUsername = jsonMessage.get("username").getAsString();
+                        
+                        // Create a one-element map for this update
+                        Map<String, String> updateMap = new HashMap<>();
+                        updateMap.put(updatedUserId, updatedUsername);
+                        
+                        // Notify listeners about this username
+                        notifyPresenceListeners(updateMap);
+                    }
                     break;
                     
                 case "insert":
@@ -506,9 +565,9 @@ public class NetworkClient {
     
     /**
      * Adds a listener for presence updates.
-     * @param listener The listener to add.
+     * @param listener the listener to add
      */
-    public void addPresenceListener(Consumer<List<String>> listener) {
+    public void addPresenceListener(Consumer<Map<String, String>> listener) {
         presenceListeners.add(listener);
     }
     
@@ -529,26 +588,117 @@ public class NetworkClient {
     }
     
     private void notifyOperationListeners(Operation operation) {
-        for (Consumer<Operation> listener : operationListeners) {
-            listener.accept(operation);
+        // Make a copy to avoid concurrent modification issues
+        final List<Consumer<Operation>> listenersCopy = new ArrayList<>(operationListeners);
+        
+        if (Platform.isFxApplicationThread()) {
+            // If already on JavaFX thread, execute directly
+            for (Consumer<Operation> listener : listenersCopy) {
+                try {
+                    listener.accept(operation);
+                } catch (Exception e) {
+                    System.err.println("Error in operation listener: " + e.getMessage());
+                }
+            }
+        } else {
+            // Otherwise, use Platform.runLater
+            Platform.runLater(() -> {
+                for (Consumer<Operation> listener : listenersCopy) {
+                    try {
+                        listener.accept(operation);
+                    } catch (Exception e) {
+                        System.err.println("Error in operation listener: " + e.getMessage());
+                    }
+                }
+            });
         }
     }
     
-    private void notifyPresenceListeners(List<String> users) {
-        for (Consumer<List<String>> listener : presenceListeners) {
-            listener.accept(users);
+    /**
+     * Notifies presence listeners of a change.
+     * @param userMap a map of userIds to usernames
+     */
+    private void notifyPresenceListeners(Map<String, String> userMap) {
+        // Make a copy to avoid concurrent modification issues
+        final List<Consumer<Map<String, String>>> listenersCopy = new ArrayList<>(presenceListeners);
+        final Map<String, String> userMapCopy = new HashMap<>(userMap);
+        
+        if (Platform.isFxApplicationThread()) {
+            // If already on JavaFX thread, execute directly
+            for (Consumer<Map<String, String>> listener : listenersCopy) {
+                try {
+                    listener.accept(userMapCopy);
+                } catch (Exception e) {
+                    System.err.println("Error in presence listener: " + e.getMessage());
+                }
+            }
+        } else {
+            // Otherwise, use Platform.runLater
+            Platform.runLater(() -> {
+                for (Consumer<Map<String, String>> listener : listenersCopy) {
+                    try {
+                        listener.accept(userMapCopy);
+                    } catch (Exception e) {
+                        System.err.println("Error in presence listener: " + e.getMessage());
+                    }
+                }
+            });
         }
     }
     
     private void notifyErrorListeners(String error) {
-        for (Consumer<String> listener : errorListeners) {
-            listener.accept(error);
+        // Make a copy to avoid concurrent modification issues
+        final List<Consumer<String>> listenersCopy = new ArrayList<>(errorListeners);
+        final String errorMessage = error;
+        
+        if (Platform.isFxApplicationThread()) {
+            // If already on JavaFX thread, execute directly
+            for (Consumer<String> listener : listenersCopy) {
+                try {
+                    listener.accept(errorMessage);
+                } catch (Exception e) {
+                    System.err.println("Error in error listener: " + e.getMessage());
+                }
+            }
+        } else {
+            // Otherwise, use Platform.runLater
+            Platform.runLater(() -> {
+                for (Consumer<String> listener : listenersCopy) {
+                    try {
+                        listener.accept(errorMessage);
+                    } catch (Exception e) {
+                        System.err.println("Error in error listener: " + e.getMessage());
+                    }
+                }
+            });
         }
     }
     
     private void notifyCodeListeners(CodePair codePair) {
-        for (Consumer<CodePair> listener : codeListeners) {
-            listener.accept(codePair);
+        // Make a copy to avoid concurrent modification issues
+        final List<Consumer<CodePair>> listenersCopy = new ArrayList<>(codeListeners);
+        final CodePair codePairCopy = codePair;
+        
+        if (Platform.isFxApplicationThread()) {
+            // If already on JavaFX thread, execute directly
+            for (Consumer<CodePair> listener : listenersCopy) {
+                try {
+                    listener.accept(codePairCopy);
+                } catch (Exception e) {
+                    System.err.println("Error in code listener: " + e.getMessage());
+                }
+            }
+        } else {
+            // Otherwise, use Platform.runLater
+            Platform.runLater(() -> {
+                for (Consumer<CodePair> listener : listenersCopy) {
+                    try {
+                        listener.accept(codePairCopy);
+                    } catch (Exception e) {
+                        System.err.println("Error in code listener: " + e.getMessage());
+                    }
+                }
+            });
         }
     }
     
@@ -637,5 +787,71 @@ public class NetworkClient {
                 }
             }).start();
         }
+    }
+    
+    /**
+     * Sends an undo operation to the server.
+     * @param operation The operation that was undone
+     */
+    public void sendUndo(Operation operation) {
+        if (!connected) {
+            notifyErrorListeners("Not connected to server");
+            return;
+        }
+        
+        JsonObject message = new JsonObject();
+        message.addProperty("type", "undo");
+        message.addProperty("userId", userId);
+        message.addProperty("username", username);
+        
+        if (operation.getType() == Operation.Type.INSERT) {
+            // For insert operations, we need to send the character position
+            message.add("position", gson.toJsonTree(operation.getCharacter().getPosition()));
+        } else {
+            // For delete operations, we need to send the character
+            JsonObject charObj = new JsonObject();
+            charObj.addProperty("value", operation.getCharacter().getValue());
+            charObj.add("position", gson.toJsonTree(operation.getCharacter().getPosition()));
+            charObj.addProperty("authorId", operation.getCharacter().getAuthorId());
+            charObj.addProperty("timestamp", operation.getCharacter().getTimestamp());
+            message.add("character", charObj);
+        }
+        
+        message.addProperty("operationType", operation.getType().toString());
+        
+        webSocketClient.send(gson.toJson(message));
+    }
+    
+    /**
+     * Sends a redo operation to the server.
+     * @param operation The operation that was redone
+     */
+    public void sendRedo(Operation operation) {
+        if (!connected) {
+            notifyErrorListeners("Not connected to server");
+            return;
+        }
+        
+        JsonObject message = new JsonObject();
+        message.addProperty("type", "redo");
+        message.addProperty("userId", userId);
+        message.addProperty("username", username);
+        
+        if (operation.getType() == Operation.Type.INSERT) {
+            // For insert operations, we need to send the character
+            JsonObject charObj = new JsonObject();
+            charObj.addProperty("value", operation.getCharacter().getValue());
+            charObj.add("position", gson.toJsonTree(operation.getCharacter().getPosition()));
+            charObj.addProperty("authorId", operation.getCharacter().getAuthorId());
+            charObj.addProperty("timestamp", operation.getCharacter().getTimestamp());
+            message.add("character", charObj);
+        } else {
+            // For delete operations, we need to send the position
+            message.add("position", gson.toJsonTree(operation.getCharacter().getPosition()));
+        }
+        
+        message.addProperty("operationType", operation.getType().toString());
+        
+        webSocketClient.send(gson.toJson(message));
     }
 } 

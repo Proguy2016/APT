@@ -277,7 +277,18 @@ public class DatabaseService {
         }
         
         try {
-            Bson filter = Filters.eq("_id", new ObjectId(documentId));
+            // Handle different ID formats safely
+            Object idToQuery;
+            try {
+                // First try to parse as ObjectId
+                idToQuery = new ObjectId(documentId);
+            } catch (Exception e) {
+                // If it fails, use as string ID
+                System.out.println("Using string ID instead of ObjectId: " + documentId);
+                idToQuery = documentId;
+            }
+            
+            Bson filter = Filters.eq("_id", idToQuery);
             Bson update = Updates.combine(
                     Updates.set("content", content),
                     Updates.set("updatedAt", new Date())
@@ -303,22 +314,36 @@ public class DatabaseService {
     }
     
     /**
-     * Updates a document's content and session code.
+     * Updates a document's content and session codes.
      * @param documentId The document ID.
      * @param content The new content.
-     * @param sessionCode The session code.
+     * @param editorCode The editor session code.
+     * @param viewerCode The viewer session code.
      * @return True if the update was successful, false otherwise.
      */
-    public boolean updateDocumentWithSession(String documentId, String content, String sessionCode) {
+    public boolean updateDocumentWithSession(String documentId, String content, 
+                                            String editorCode, String viewerCode) {
         if (useInMemoryStorage) {
-            return updateDocumentWithSessionInMemory(documentId, content, sessionCode);
+            return updateDocumentWithSessionInMemory(documentId, content, editorCode, viewerCode);
         }
         
         try {
-            Bson filter = Filters.eq("_id", new ObjectId(documentId));
+            // Handle different ID formats safely
+            Object idToQuery;
+            try {
+                // First try to parse as ObjectId
+                idToQuery = new ObjectId(documentId);
+            } catch (Exception e) {
+                // If it fails, use as string ID
+                System.out.println("Using string ID instead of ObjectId: " + documentId);
+                idToQuery = documentId;
+            }
+            
+            Bson filter = Filters.eq("_id", idToQuery);
             Bson update = Updates.combine(
                     Updates.set("content", content),
-                    Updates.set("sessionCode", sessionCode),
+                    Updates.set("editorCode", editorCode),
+                    Updates.set("viewerCode", viewerCode),
                     Updates.set("updatedAt", new Date())
             );
             
@@ -327,19 +352,33 @@ public class DatabaseService {
         } catch (Exception e) {
             System.err.println("Error updating document with session: " + e.getMessage());
             e.printStackTrace();
-            return updateDocumentWithSessionInMemory(documentId, content, sessionCode);
+            return updateDocumentWithSessionInMemory(documentId, content, editorCode, viewerCode);
         }
     }
     
-    private boolean updateDocumentWithSessionInMemory(String documentId, String content, String sessionCode) {
+    private boolean updateDocumentWithSessionInMemory(String documentId, String content, 
+                                                     String editorCode, String viewerCode) {
         InMemoryDocument document = documentMap.get(documentId);
         if (document != null) {
             document.content = content;
-            document.sessionCode = sessionCode;
+            document.editorCode = editorCode;
+            document.viewerCode = viewerCode;
             document.updatedAt = new Date();
             return true;
         }
         return false;
+    }
+    
+    /**
+     * Updates a document's content and session code (legacy method).
+     * @param documentId The document ID.
+     * @param content The new content.
+     * @param sessionCode The session code.
+     * @return True if the update was successful, false otherwise.
+     */
+    public boolean updateDocumentWithSession(String documentId, String content, String sessionCode) {
+        // For backward compatibility - use the same code for both editor and viewer
+        return updateDocumentWithSession(documentId, content, sessionCode, sessionCode);
     }
     
     /**
@@ -353,7 +392,18 @@ public class DatabaseService {
         }
         
         try {
-            return documentsCollection.find(Filters.eq("_id", new ObjectId(documentId))).first();
+            // Handle different ID formats safely
+            Object idToQuery;
+            try {
+                // First try to parse as ObjectId
+                idToQuery = new ObjectId(documentId);
+            } catch (Exception e) {
+                // If it fails, use as string ID
+                System.out.println("Using string ID instead of ObjectId: " + documentId);
+                idToQuery = documentId;
+            }
+            
+            return documentsCollection.find(Filters.eq("_id", idToQuery)).first();
         } catch (Exception e) {
             System.err.println("Error getting document: " + e.getMessage());
             e.printStackTrace();
@@ -369,7 +419,8 @@ public class DatabaseService {
             doc.append("title", inMemoryDoc.title);
             doc.append("ownerId", inMemoryDoc.ownerId);
             doc.append("content", inMemoryDoc.content);
-            doc.append("sessionCode", inMemoryDoc.sessionCode);
+            doc.append("editorCode", inMemoryDoc.editorCode);
+            doc.append("viewerCode", inMemoryDoc.viewerCode);
             doc.append("createdAt", inMemoryDoc.createdAt);
             doc.append("updatedAt", inMemoryDoc.updatedAt);
             return doc;
@@ -408,7 +459,8 @@ public class DatabaseService {
                 doc.append("title", inMemoryDoc.title);
                 doc.append("ownerId", inMemoryDoc.ownerId);
                 doc.append("content", inMemoryDoc.content);
-                doc.append("sessionCode", inMemoryDoc.sessionCode);
+                doc.append("editorCode", inMemoryDoc.editorCode);
+                doc.append("viewerCode", inMemoryDoc.viewerCode);
                 doc.append("createdAt", inMemoryDoc.createdAt);
                 doc.append("updatedAt", inMemoryDoc.updatedAt);
                 documents.add(doc);
@@ -425,7 +477,8 @@ public class DatabaseService {
             doc.append("title", inMemoryDoc.title);
             doc.append("ownerId", inMemoryDoc.ownerId);
             doc.append("content", inMemoryDoc.content);
-            doc.append("sessionCode", inMemoryDoc.sessionCode);
+            doc.append("editorCode", inMemoryDoc.editorCode);
+            doc.append("viewerCode", inMemoryDoc.viewerCode);
             doc.append("createdAt", inMemoryDoc.createdAt);
             doc.append("updatedAt", inMemoryDoc.updatedAt);
             documents.add(doc);
@@ -468,7 +521,8 @@ public class DatabaseService {
         public final String title;
         public final String ownerId;
         public String content;
-        public String sessionCode;
+        public String editorCode;
+        public String viewerCode;
         public final Date createdAt;
         public Date updatedAt;
         
@@ -477,7 +531,8 @@ public class DatabaseService {
             this.title = title;
             this.ownerId = ownerId;
             this.content = content;
-            this.sessionCode = "";
+            this.editorCode = "";
+            this.viewerCode = "";
             this.createdAt = createdAt;
             this.updatedAt = updatedAt;
         }

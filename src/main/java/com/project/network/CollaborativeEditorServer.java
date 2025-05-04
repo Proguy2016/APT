@@ -94,36 +94,7 @@ public class CollaborativeEditorServer extends WebSocketServer {
     public void onMessage(WebSocket conn, String message) {
         try {
             JsonObject jsonMessage = gson.fromJson(message, JsonObject.class);
-            String type = jsonMessage.get("type").getAsString();
-            
-            switch (type) {
-                case "register":
-                    handleRegister(conn, jsonMessage);
-                    break;
-                case "create_session":
-                    handleCreateSession(conn, jsonMessage);
-                    break;
-                case "join_session":
-                    handleJoinSession(conn, jsonMessage);
-                    break;
-                case "insert":
-                    handleInsert(conn, jsonMessage);
-                    break;
-                case "delete":
-                    handleDelete(conn, jsonMessage);
-                    break;
-                case "cursor_move":
-                    handleCursorMove(conn, jsonMessage);
-                    break;
-                case "document_update":
-                    handleDocumentUpdate(conn, jsonMessage);
-                    break;
-                case "sync_confirmation":
-                    handleSyncConfirmation(conn, jsonMessage);
-                    break;
-                default:
-                    System.out.println("Unknown message type: " + type);
-            }
+            handleMessage(conn, jsonMessage);
         } catch (Exception e) {
             System.err.println("Error processing message: " + e.getMessage());
             e.printStackTrace();
@@ -143,6 +114,60 @@ public class CollaborativeEditorServer extends WebSocketServer {
     @Override
     public void onStart() {
         System.out.println("WebSocket server started on port " + getPort());
+    }
+    
+    private void handleMessage(WebSocket conn, JsonObject message) {
+        String type = message.get("type").getAsString();
+        
+        try {
+            switch (type) {
+                case "register":
+                    handleRegister(conn, message);
+                    break;
+                case "create_session":
+                    handleCreateSession(conn, message);
+                    break;
+                case "join_session":
+                    handleJoinSession(conn, message);
+                    break;
+                case "insert":
+                    handleInsert(conn, message);
+                    break;
+                case "delete":
+                    handleDelete(conn, message);
+                    break;
+                case "cursor_move":
+                    handleCursorMove(conn, message);
+                    break;
+                case "document_update":
+                    handleDocumentUpdate(conn, message);
+                    break;
+                case "instant_document_update":
+                    handleInstantDocumentUpdate(conn, message);
+                    break;
+                case "undo":
+                    handleUndo(conn, message);
+                    break;
+                case "redo":
+                    handleRedo(conn, message);
+                    break;
+                case "sync_confirmation":
+                    handleSyncConfirmation(conn, message);
+                    break;
+                case "request_resync":
+                    handleResyncRequest(conn, message);
+                    break;
+                case "update_username":
+                    handleUpdateUsername(conn, message);
+                    break;
+                default:
+                    sendError(conn, "Unknown message type: " + type);
+            }
+        } catch (Exception e) {
+            System.err.println("Error processing message: " + e.getMessage());
+            e.printStackTrace();
+            sendError(conn, "Error processing message: " + e.getMessage());
+        }
     }
     
     private void handleRegister(WebSocket conn, JsonObject message) {
@@ -471,6 +496,182 @@ public class CollaborativeEditorServer extends WebSocketServer {
             syncMsg.addProperty("content", session.getDocumentContent());
             syncMsg.addProperty("syncRetry", true);
             conn.send(gson.toJson(syncMsg));
+        }
+    }
+    
+    /**
+     * Handles a specialized instant document update.
+     * This provides faster synchronization than regular document updates.
+     */
+    private void handleInstantDocumentUpdate(WebSocket conn, JsonObject message) {
+        String userId = connectionToUserId.get(conn);
+        
+        if (userId == null) {
+            sendError(conn, "Not registered");
+            return;
+        }
+        
+        EditorSession session = userSessions.get(userId);
+        if (session == null) {
+            sendError(conn, "Not in a session");
+            return;
+        }
+        
+        // Check if the user is an editor
+        if (!session.isEditor(userId)) {
+            sendError(conn, "Not authorized to edit");
+            return;
+        }
+        
+        // Immediately update the session's document content
+        String content = message.get("content").getAsString();
+        session.setDocumentContent(content);
+        
+        // Forward to all other users in session with high priority
+        JsonObject forwardMsg = new JsonObject();
+        forwardMsg.addProperty("type", "document_sync");
+        forwardMsg.addProperty("content", content);
+        forwardMsg.addProperty("highPriority", true);
+        
+        // Get the operation type (undo/redo)
+        String operation = message.has("operation") ? message.get("operation").getAsString() : "";
+        if (!operation.isEmpty()) {
+            forwardMsg.addProperty("operation", operation);
+        }
+        
+        // Send to all other users in session
+        for (String otherUserId : session.getAllUsers()) {
+            if (!otherUserId.equals(userId)) {
+                WebSocket otherConn = userConnections.get(otherUserId);
+                if (otherConn != null && otherConn.isOpen()) {
+                    otherConn.send(gson.toJson(forwardMsg));
+                }
+            }
+        }
+    }
+    
+    /**
+     * Handles an undo operation.
+     */
+    private void handleUndo(WebSocket conn, JsonObject message) {
+        String userId = connectionToUserId.get(conn);
+        
+        if (userId == null) {
+            sendError(conn, "Not registered");
+            return;
+        }
+        
+        EditorSession session = userSessions.get(userId);
+        if (session == null) {
+            sendError(conn, "Not in a session");
+            return;
+        }
+        
+        // Forward to all other users in session
+        message.addProperty("forwardedByServer", true);
+        
+        for (String otherUserId : session.getAllUsers()) {
+            if (!otherUserId.equals(userId)) {
+                WebSocket otherConn = userConnections.get(otherUserId);
+                if (otherConn != null && otherConn.isOpen()) {
+                    otherConn.send(gson.toJson(message));
+                }
+            }
+        }
+    }
+    
+    /**
+     * Handles a redo operation.
+     */
+    private void handleRedo(WebSocket conn, JsonObject message) {
+        String userId = connectionToUserId.get(conn);
+        
+        if (userId == null) {
+            sendError(conn, "Not registered");
+            return;
+        }
+        
+        EditorSession session = userSessions.get(userId);
+        if (session == null) {
+            sendError(conn, "Not in a session");
+            return;
+        }
+        
+        // Forward to all other users in session
+        message.addProperty("forwardedByServer", true);
+        
+        for (String otherUserId : session.getAllUsers()) {
+            if (!otherUserId.equals(userId)) {
+                WebSocket otherConn = userConnections.get(otherUserId);
+                if (otherConn != null && otherConn.isOpen()) {
+                    otherConn.send(gson.toJson(message));
+                }
+            }
+        }
+    }
+    
+    /**
+     * Handles a document resync request.
+     */
+    private void handleResyncRequest(WebSocket conn, JsonObject message) {
+        String userId = connectionToUserId.get(conn);
+        
+        if (userId == null) {
+            sendError(conn, "Not registered");
+            return;
+        }
+        
+        EditorSession session = userSessions.get(userId);
+        if (session == null) {
+            sendError(conn, "Not in a session");
+            return;
+        }
+        
+        // Send the current document state to the requester
+        JsonObject syncMsg = new JsonObject();
+        syncMsg.addProperty("type", "document_sync");
+        syncMsg.addProperty("content", session.getDocumentContent());
+        syncMsg.addProperty("highPriority", true);
+        conn.send(gson.toJson(syncMsg));
+        
+        System.out.println("Sent document resync to user " + userId + 
+                           " (content length: " + session.getDocumentContent().length() + ")");
+    }
+    
+    /**
+     * Handles a username update message.
+     */
+    private void handleUpdateUsername(WebSocket conn, JsonObject message) {
+        String userId = connectionToUserId.get(conn);
+        
+        if (userId == null) {
+            sendError(conn, "Not registered");
+            return;
+        }
+        
+        // Get the username
+        String username = message.get("username").getAsString();
+        
+        // Store the username with the user
+        // Note: In a real implementation, you'd probably store this in a database
+        System.out.println("User " + userId + " updated username to " + username);
+        
+        // Forward to all sessions the user is part of
+        EditorSession session = userSessions.get(userId);
+        if (session != null) {
+            JsonObject updateMsg = new JsonObject();
+            updateMsg.addProperty("type", "update_username");
+            updateMsg.addProperty("userId", userId);
+            updateMsg.addProperty("username", username);
+            
+            for (String otherUserId : session.getAllUsers()) {
+                if (!otherUserId.equals(userId)) {
+                    WebSocket otherConn = userConnections.get(otherUserId);
+                    if (otherConn != null && otherConn.isOpen()) {
+                        otherConn.send(gson.toJson(updateMsg));
+                    }
+                }
+            }
         }
     }
     
