@@ -56,6 +56,10 @@ public class EditorController {
     @FXML
     private AnchorPane editorContainer;
     
+    // Add a label for word count
+    @FXML
+    private Label wordCountLabel;
+    
     // Observable list for the users
     private ObservableList<String> users = FXCollections.observableArrayList();
     
@@ -174,6 +178,20 @@ public class EditorController {
             // Initialize user list
             usersListView.setItems(users);
             
+            // Create word count label if it doesn't exist
+            if (wordCountLabel == null) {
+                wordCountLabel = new Label("Words: 0 | Characters: 0 | Lines: 0");
+                wordCountLabel.setStyle("-fx-text-fill: #555; -fx-font-size: 12px; -fx-padding: 5px; -fx-background-color: #f5f5f5; -fx-border-color: #ddd; -fx-border-width: 1px; -fx-border-radius: 3px;");
+                
+                // If there's a container for this, add it properly
+                // Otherwise, we'll need to add it to the scene in the FXML
+                if (editorContainer != null && !editorContainer.getChildren().contains(wordCountLabel)) {
+                    editorContainer.getChildren().add(wordCountLabel);
+                    AnchorPane.setBottomAnchor(wordCountLabel, 10.0);
+                    AnchorPane.setRightAnchor(wordCountLabel, 15.0);
+                }
+            }
+            
             // Connect to the network
             boolean connected = networkClient.connect();
             if (connected) {
@@ -197,6 +215,9 @@ public class EditorController {
                 AnchorPane.setLeftAnchor(editorArea, 0.0);
             }
             
+            // Initialize word count
+            updateWordCount();
+            
             // Set flag to prevent double initialization
             initialized = true;
         } catch (Exception e) {
@@ -218,9 +239,18 @@ public class EditorController {
         // Add code listener
         networkClient.addCodeListener(codes -> {
             Platform.runLater(() -> {
-                // Update the UI fields
-                editorCodeField.setText(codes.getEditorCode());
-                viewerCodeField.setText(codes.getViewerCode());
+                // Log the received codes
+                System.out.println("Received session codes - Editor: " + codes.getEditorCode() + ", Viewer: " + codes.getViewerCode());
+                
+                // Update the UI fields based on user role
+                if (isEditor) {
+                    editorCodeField.setText(codes.getEditorCode());
+                    viewerCodeField.setText(codes.getViewerCode());
+                } else {
+                    // For viewers, we still store the codes but don't display the editor code
+                    // in the UI to prevent confusion
+                    viewerCodeField.setText(codes.getViewerCode());
+                }
                 
                 // Save the codes with the document in the database
                 if (documentId != null) {
@@ -391,6 +421,9 @@ public class EditorController {
         
         // Send cursor position to network once at end of batch
         networkClient.sendCursorMove(startPosition + textToInsert.length());
+        
+        // Update the word count after batch processing
+        updateWordCount();
     }
     
     private void handleRemoteOperation(Operation operation) {
@@ -500,6 +533,9 @@ public class EditorController {
                     // Update the UI
                     updateEditorText(content);
                     
+                    // Also update word count directly, in case updateEditorText doesn't trigger it
+                    updateWordCount();
+                    
                     // Log successful sync
                     System.out.println("Document synchronized with " + content.length() + " characters");
                     updateStatus("Document synchronized successfully");
@@ -518,6 +554,7 @@ public class EditorController {
                     });
                 } else {
                     updateStatus("Synchronized empty document");
+                    updateWordCount(); // Update for empty document
                 }
             }
         } catch (Exception e) {
@@ -525,6 +562,55 @@ public class EditorController {
             e.printStackTrace();
             updateStatus("Error during document sync: " + e.getMessage());
         }
+    }
+    
+    /**
+     * Updates the word count label with the current count from the document.
+     * Also displays character and line counts.
+     */
+    private void updateWordCount() {
+        if (document == null || wordCountLabel == null) {
+            return;
+        }
+        
+        String text = document.getText();
+        int wordCount = 0;
+        int charCount = 0;
+        int lineCount = 0;
+        
+        if (text != null) {
+            charCount = text.length();
+            
+            if (!text.isEmpty()) {
+                // Count lines (newlines + 1)
+                lineCount = 1;
+                for (char c : text.toCharArray()) {
+                    if (c == '\n') {
+                        lineCount++;
+                    }
+                }
+                
+                // Split by whitespace and count non-empty words
+                String[] words = text.split("\\s+");
+                for (String word : words) {
+                    if (!word.trim().isEmpty()) {
+                        wordCount++;
+                    }
+                }
+            } else {
+                // Empty document
+                lineCount = 1;
+            }
+        }
+        
+        final int finalWordCount = wordCount;
+        final int finalCharCount = charCount;
+        final int finalLineCount = lineCount;
+        
+        Platform.runLater(() -> {
+            wordCountLabel.setText(String.format("Words: %d | Characters: %d | Lines: %d", 
+                finalWordCount, finalCharCount, finalLineCount));
+        });
     }
     
     private void updateEditorText(String newText) {
@@ -545,6 +631,9 @@ public class EditorController {
                 caretPosition = newText.length();
             }
             editorArea.positionCaret(caretPosition);
+            
+            // Update the word count
+            updateWordCount();
         } finally {
             isUpdatingText.set(false);
         }
@@ -1126,13 +1215,13 @@ public class EditorController {
                 }
                 cursorMarkers.clear();
                 
-                // Join the session
+                // Important: Join the session with the server FIRST
+                System.out.println("Joining session with code: " + code + " as " + (isEditorRole ? "editor" : "viewer"));
                 networkClient.joinSession(code, isEditor);
                 
-                // Create a new document for this session if one doesn't exist already
-                createDocumentForSession(code, isEditorRole);
-                
+                // Update UI to show we're waiting
                 if (isEditor) {
+                    editorCodeField.setText(code); // Set the editor code field for editors
                     updateStatus("Joined session as editor - waiting for content sync...");
                 } else {
                     updateStatus("Joined session as viewer - waiting for content sync...");
@@ -1141,24 +1230,33 @@ public class EditorController {
                     viewerCodeField.setText("");
                 }
                 
-                // Force a sync request after a short delay
+                // Wait a moment to let the session join process complete
                 new Thread(() -> {
                     try {
+                        // Give the server time to process the join
                         Thread.sleep(500);
                         
-                        // Tell the server we need content by sending a special sync request
-                        if (networkClient != null) {
-                            Platform.runLater(() -> {
+                        // Now create/update the local document for this session
+                        Platform.runLater(() -> {
+                            try {
+                                // Create a new document for this session if one doesn't exist already
+                                createDocumentForSession(code, isEditorRole);
+                                
+                                // Force a sync request
                                 updateStatus("Requesting document sync...");
                                 Operation requestResyncOperation = 
                                     new Operation(Operation.Type.REQUEST_DOCUMENT_RESYNC, null, null, userId, -1);
                                 handleRemoteOperation(requestResyncOperation);
-                            });
-                        }
+                            } catch (Exception e) {
+                                updateStatus("Error creating document: " + e.getMessage());
+                                e.printStackTrace();
+                            }
+                        });
                     } catch (Exception e) {
                         e.printStackTrace();
                     }
                 }).start();
+                
             } catch (Exception e) {
                 updateStatus("Error joining session: " + e.getMessage());
                 e.printStackTrace();
@@ -1283,10 +1381,8 @@ public class EditorController {
         }
         cursorMarkers.clear();
         
-        // Disconnect from network
-        if (networkClient != null) {
-            networkClient.disconnect();
-        }
+        // Fully disconnect from network when exiting
+        leaveCurrentSession(true);
         
         // Close the window
         ((Stage) editorArea.getScene().getWindow()).close();
@@ -1325,13 +1421,30 @@ public class EditorController {
             // Save current document if needed
             saveDocument();
             
-            // Leave current session if in one
-            leaveCurrentSession();
+            // Leave current session, but don't disconnect completely
+            leaveCurrentSession(false);
             
             // Show document selection dialog
             Pair<String, String> documentInfo = DocumentSelectionDialog.showDocumentSelectionDialog(userId);
             if (documentInfo != null) {
-                documentId = documentInfo.getKey();
+                String key = documentInfo.getKey();
+                
+                // Check if this is a join request
+                if (key != null && key.startsWith("JOIN:")) {
+                    // Parse the join information - format is JOIN:CODE:ROLE
+                    String[] parts = key.split(":");
+                    if (parts.length >= 3) {
+                        String code = parts[1];
+                        boolean isEditorRole = "EDITOR".equals(parts[2]);
+                        
+                        // Handle joining directly
+                        joinExistingSession(code, isEditorRole);
+                        return;
+                    }
+                }
+                
+                // Normal document open
+                documentId = key;
                 documentTitle = documentInfo.getValue();
                 
                 // Set window title
@@ -1349,147 +1462,91 @@ public class EditorController {
         }
     }
     
-    private void loadDocumentContent() {
+    /**
+     * Joins an existing session using the provided code.
+     * 
+     * @param code The session code
+     * @param isEditorRole Whether to join as editor or viewer
+     */
+    private void joinExistingSession(String code, boolean isEditorRole) {
         try {
-            // First clear any existing content and process any pending operations
-            processBatchInserts();
-            document = new CRDTDocument(userId);
-            updateEditorText("");
+            // Save this code to recent session codes
+            DocumentSelectionDialog.saveRecentSessionCode(code);
             
-            updateStatus("Loading document: " + documentTitle + "...");
+            // Update our editor status
+            isEditor = isEditorRole;
             
-            // Make sure document ID is valid
-            if (documentId == null || documentId.isEmpty()) {
-                updateStatus("Invalid document ID");
-                return;
+            // Update UI based on role
+            editorArea.setEditable(isEditor);
+            
+            // Clear the editor before joining to prepare for document sync
+            processBatchInserts(); // Process any pending operations
+            updateEditorText(""); // Clear editor
+            document = new CRDTDocument(userId); // Reset document
+            
+            // Clear existing cursor markers
+            for (CursorMarker marker : new ArrayList<>(cursorMarkers.values())) {
+                cleanupCursorMarker(marker);
             }
+            cursorMarkers.clear();
             
-            org.bson.Document doc = null;
-            try {
-                doc = DatabaseService.getInstance().getDocument(documentId);
-            } catch (Exception e) {
-                System.err.println("Database error: " + e.getMessage());
-                e.printStackTrace();
-                updateStatus("Error connecting to database. Using empty document.");
-                return;
-            }
+            // Important: Join the session with the server FIRST
+            System.out.println("Joining session with code: " + code + " as " + (isEditorRole ? "editor" : "viewer"));
+            networkClient.joinSession(code, isEditor);
             
-            if (doc != null) {
-                String content = null;
-                try {
-                    content = doc.getString("content");
-                } catch (Exception e) {
-                    System.err.println("Error reading document content: " + e.getMessage());
-                    updateStatus("Error reading document content. Using empty document.");
-                    return;
-                }
-                
-                // Check for existing session codes
-                String existingEditorCode = null;
-                String existingViewerCode = null;
-                try {
-                    existingEditorCode = doc.getString("editorCode");
-                    existingViewerCode = doc.getString("viewerCode");
-                } catch (Exception e) {
-                    System.err.println("Error reading session codes: " + e.getMessage());
-                }
-                
-                // If at least editor code exists, use it
-                if (existingEditorCode != null && !existingEditorCode.isEmpty()) {
-                    try {
-                        updateStatus("Using existing session: " + existingEditorCode);
-                        
-                        // Set the codes in the UI
-                        editorCodeField.setText(existingEditorCode);
-                        if (existingViewerCode != null && !existingViewerCode.isEmpty()) {
-                            viewerCodeField.setText(existingViewerCode);
-                        }
-                        
-                        // Join the existing session as an editor
-                        networkClient.joinSession(existingEditorCode, true);
-                        isEditor = true;
-                        
-                        // Request document sync after joining
-                        Operation requestResyncOperation = 
-                            new Operation(Operation.Type.REQUEST_DOCUMENT_RESYNC, null, null, userId, -1);
-                        handleRemoteOperation(requestResyncOperation);
-                        
-                        updateStatus("Joined existing document session: " + existingEditorCode);
-                        return; // Content will be synced through the session
-                    } catch (Exception e) {
-                        System.err.println("Error joining existing session: " + e.getMessage());
-                        // If session join fails, fall back to loading content directly
-                    }
-                }
-                
-                // Otherwise proceed with normal content loading
-                if (content != null && !content.isEmpty()) {
-                    updateStatus("Loading document content...");
-                    
-                    try {
-                        // Insert the content character by character
-                        for (int i = 0; i < content.length(); i++) {
-                            document.localInsert(i, content.charAt(i));
-                        }
-                        
-                        // Update the text area
-                        updateEditorText(content);
-                        
-                        // Explicitly send document update to sync with server
-                        networkClient.sendDocumentUpdate(content);
-                        
-                        // If no session codes exist, generate new ones for this document
-                        if ((existingEditorCode == null || existingEditorCode.isEmpty()) &&
-                            (existingViewerCode == null || existingViewerCode.isEmpty())) {
-                            // Request new codes from server (will be saved when received)
-                            networkClient.requestCodes();
-                        }
-                        
-                        updateStatus("Loaded document: " + documentTitle);
-                    } catch (Exception e) {
-                        System.err.println("Error inserting document content: " + e.getMessage());
-                        e.printStackTrace();
-                        updateStatus("Error loading document content. Using empty document.");
-                    }
-                } else {
-                    // Empty document
-                    updateEditorText("");
-                    
-                    // If no session codes exist, generate new ones for this document
-                    if ((existingEditorCode == null || existingEditorCode.isEmpty()) &&
-                        (existingViewerCode == null || existingViewerCode.isEmpty())) {
-                        // Request new codes from server (will be saved when received)
-                        networkClient.requestCodes();
-                    }
-                    
-                    updateStatus("Loaded empty document: " + documentTitle);
-                }
+            // Update UI to show we're waiting
+            if (isEditor) {
+                editorCodeField.setText(code); // Set the editor code field for editors
+                updateStatus("Joined session as editor - waiting for content sync...");
             } else {
-                // No document found
-                updateStatus("Could not find document with ID: " + documentId);
+                updateStatus("Joined session as viewer - waiting for content sync...");
+                // Hide the sharing codes for viewers
+                editorCodeField.setText("");
+                viewerCodeField.setText("");
             }
-        } catch (Exception e) {
-            updateStatus("Error loading document: " + e.getMessage());
-            e.printStackTrace();
             
-            // Reset to empty document in case of error
-            try {
-                document = new CRDTDocument(userId);
-                updateEditorText("");
-            } catch (Exception ex) {
-                System.err.println("Failed to reset document: " + ex.getMessage());
-            }
+            // Wait a moment to let the session join process complete
+            new Thread(() -> {
+                try {
+                    // Give the server time to process the join
+                    Thread.sleep(500);
+                    
+                    // Now create/update the local document for this session
+                    Platform.runLater(() -> {
+                        try {
+                            // Create a new document for this session if one doesn't exist already
+                            createDocumentForSession(code, isEditorRole);
+                            
+                            // Force a sync request
+                            updateStatus("Requesting document sync...");
+                            Operation requestResyncOperation = 
+                                new Operation(Operation.Type.REQUEST_DOCUMENT_RESYNC, null, null, userId, -1);
+                            handleRemoteOperation(requestResyncOperation);
+                        } catch (Exception e) {
+                            updateStatus("Error creating document: " + e.getMessage());
+                            e.printStackTrace();
+                        }
+                    });
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }).start();
+        } catch (Exception e) {
+            updateStatus("Error joining session: " + e.getMessage());
+            e.printStackTrace();
         }
     }
     
     /**
      * Leaves the current editing session if any.
+     * Modified to preserve session codes and only clean up UI elements.
+     * @param fullDisconnect If true, completely disconnects from the network (for app shutdown)
      */
-    private void leaveCurrentSession() {
+    private void leaveCurrentSession(boolean fullDisconnect) {
         try {
-            // Clear sharing codes
-            editorCodeField.setText("");
-            viewerCodeField.setText("");
+            // Save current session codes before clearing UI
+            String currentEditorCode = editorCodeField.getText();
+            String currentViewerCode = viewerCodeField.getText();
             
             // Clear cursor markers
             for (CursorMarker marker : new ArrayList<>(cursorMarkers.values())) {
@@ -1504,26 +1561,50 @@ public class EditorController {
             isEditor = true;
             editorArea.setEditable(true);
             
-            // Send leave session message (if supported by the server)
-            // For now, just disconnect and reconnect
-            if (networkClient != null) {
-                networkClient.disconnect();
+            if (fullDisconnect) {
+                // Clear codes when fully disconnecting
+                editorCodeField.setText("");
+                viewerCodeField.setText("");
                 
-                // Wait a bit before reconnecting
-                try {
-                    Thread.sleep(200);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
+                // Disconnect from network completely (only for app shutdown)
+                if (networkClient != null) {
+                    networkClient.disconnect();
+                    
+                    // Wait a bit before reconnecting
+                    try {
+                        Thread.sleep(200);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    
+                    networkClient = new NetworkClient(userId);
+                    setupNetworkListeners();
+                    networkClient.connect();
                 }
+            } else {
+                // For regular document switching, we just clean up UI but preserve network connection
+                System.out.println("Temporary session transition - preserving codes: " + 
+                                  "Editor=" + currentEditorCode + ", Viewer=" + currentViewerCode);
                 
-                networkClient = new NetworkClient(userId);
-                setupNetworkListeners();
-                networkClient.connect();
+                // Store codes for possible restoration when loading new document
+                if (documentId != null && currentEditorCode != null && !currentEditorCode.isEmpty()) {
+                    // Save the session codes with the document
+                    DatabaseService.getInstance().updateDocumentWithSession(
+                        documentId, document.getText(), currentEditorCode, currentViewerCode);
+                }
             }
         } catch (Exception e) {
-            System.err.println("Error leaving session: " + e.getMessage());
+            System.err.println("Error during session transition: " + e.getMessage());
             e.printStackTrace();
         }
+    }
+    
+    /**
+     * Legacy version of leaveCurrentSession that fully disconnects.
+     * Kept for backward compatibility.
+     */
+    private void leaveCurrentSession() {
+        leaveCurrentSession(true);
     }
     
     private void setupAutoSaveTimer() {
@@ -1657,6 +1738,9 @@ public class EditorController {
                 // Update the UI
                 updateEditorText(cleanedText);
                 
+                // Update word count
+                updateWordCount();
+                
                 // Reset cursor markers
                 Platform.runLater(() -> {
                     for (CursorMarker marker : new ArrayList<>(cursorMarkers.values())) {
@@ -1702,6 +1786,202 @@ public class EditorController {
         } catch (Exception e) {
             updateStatus("Error testing MongoDB connection: " + e.getMessage());
             e.printStackTrace();
+        }
+    }
+    
+    /**
+     * Instead of a separate Share button, this method is used to copy the current document's codes.
+     * @param event The action event.
+     */
+    @FXML
+    private void handleShareCodes(ActionEvent event) {
+        // This replaces the old Share button functionality
+        // Just copy codes to clipboard and show in UI
+        String editorCode = editorCodeField.getText();
+        String viewerCode = viewerCodeField.getText();
+        
+        if (editorCode != null && !editorCode.isEmpty() && 
+            viewerCode != null && !viewerCode.isEmpty()) {
+            // Create a nicely formatted message for sharing
+            String shareMessage = "Join my document!\n" +
+                                 "Editor code: " + editorCode + "\n" +
+                                 "Viewer code: " + viewerCode;
+            
+            copyToSystemClipboard(shareMessage);
+            updateStatus("Sharing codes copied to clipboard");
+        } else {
+            updateStatus("No sharing codes available for this document");
+        }
+    }
+    
+    /**
+     * Loads the content of the current document.
+     * Now connects to an existing session or creates a new one if needed.
+     */
+    private void loadDocumentContent() {
+        try {
+            // First clear any existing content and process any pending operations
+            processBatchInserts();
+            document = new CRDTDocument(userId);
+            updateEditorText("");
+            
+            updateStatus("Loading document: " + documentTitle + "...");
+            
+            // Make sure document ID is valid
+            if (documentId == null || documentId.isEmpty()) {
+                updateStatus("Invalid document ID");
+                return;
+            }
+            
+            org.bson.Document doc = null;
+            try {
+                doc = DatabaseService.getInstance().getDocument(documentId);
+            } catch (Exception e) {
+                System.err.println("Database error: " + e.getMessage());
+                e.printStackTrace();
+                updateStatus("Error connecting to database. Using empty document.");
+                return;
+            }
+            
+            if (doc != null) {
+                // Get owner ID to check if this is our own document or a shared one
+                String ownerId = doc.getString("ownerId");
+                boolean isOwnedByCurrentUser = userId.equals(ownerId);
+                
+                String content = null;
+                try {
+                    content = doc.getString("content");
+                } catch (Exception e) {
+                    System.err.println("Error reading document content: " + e.getMessage());
+                    updateStatus("Error reading document content. Using empty document.");
+                    return;
+                }
+                
+                // Check for existing session codes
+                String existingEditorCode = null;
+                String existingViewerCode = null;
+                try {
+                    existingEditorCode = doc.getString("editorCode");
+                    existingViewerCode = doc.getString("viewerCode");
+                } catch (Exception e) {
+                    System.err.println("Error reading session codes: " + e.getMessage());
+                }
+                
+                // If this is a shared document, we should always join as viewer unless we're the owner
+                if (!isOwnedByCurrentUser) {
+                    System.out.println("Opening shared document. Owner: " + ownerId);
+                    
+                    // Check if this document is in our recent session codes to determine role
+                    List<String> recentCodes = DocumentSelectionDialog.loadRecentSessionCodes();
+                    boolean hasEditorAccess = false;
+                    boolean hasViewerAccess = false;
+                    
+                    // Check which type of access this user has
+                    if (existingEditorCode != null && !existingEditorCode.isEmpty() && recentCodes.contains(existingEditorCode)) {
+                        hasEditorAccess = true;
+                    }
+                    
+                    if (existingViewerCode != null && !existingViewerCode.isEmpty() && recentCodes.contains(existingViewerCode)) {
+                        hasViewerAccess = true;
+                    }
+                    
+                    // Join with the appropriate role - prefer editor access if available
+                    if (hasEditorAccess) {
+                        DocumentSelectionDialog.saveRecentSessionCode(existingEditorCode);
+                        joinExistingSession(existingEditorCode, true);  // Join as editor
+                        return;
+                    } else if (hasViewerAccess) {
+                        DocumentSelectionDialog.saveRecentSessionCode(existingViewerCode);
+                        joinExistingSession(existingViewerCode, false);  // Join as viewer
+                        return;
+                    } else if (existingViewerCode != null && !existingViewerCode.isEmpty()) {
+                        // Fall back to viewer code if no prior access is recorded
+                        DocumentSelectionDialog.saveRecentSessionCode(existingViewerCode);
+                        joinExistingSession(existingViewerCode, false);  // Join as viewer
+                        return;
+                    } else if (existingEditorCode != null && !existingEditorCode.isEmpty()) {
+                        // If only editor code is available, try that
+                        DocumentSelectionDialog.saveRecentSessionCode(existingEditorCode);
+                        joinExistingSession(existingEditorCode, true);  // Try as editor
+                        return;
+                    } else {
+                        updateStatus("Cannot access shared document - no session codes available");
+                        return;
+                    }
+                }
+                
+                // If session codes exist for our own document, join the existing session
+                if (existingEditorCode != null && !existingEditorCode.isEmpty()) {
+                    // Save this code to recent session codes
+                    DocumentSelectionDialog.saveRecentSessionCode(existingEditorCode);
+                    
+                    // Use the automatic joining function
+                    joinExistingSession(existingEditorCode, true);
+                    return;
+                } else {
+                    // No session codes exist, generate new ones and create a live session
+                    updateStatus("Creating new session for document...");
+                    
+                    // Request new codes from server
+                    networkClient.requestCodes();
+                    
+                    // Set a brief delay to wait for codes to be assigned
+                    new Thread(() -> {
+                        try {
+                            Thread.sleep(500);
+                            
+                            // Request document sync after session is created
+                            Platform.runLater(() -> {
+                                Operation requestResyncOperation = 
+                                    new Operation(Operation.Type.REQUEST_DOCUMENT_RESYNC, null, null, userId, -1);
+                                handleRemoteOperation(requestResyncOperation);
+                            });
+                        } catch (Exception e) {
+                            e.printStackTrace();
+                        }
+                    }).start();
+                }
+                
+                // Load initial content directly while waiting for session
+                if (content != null && !content.isEmpty()) {
+                    try {
+                        // Insert the content character by character
+                        for (int i = 0; i < content.length(); i++) {
+                            document.localInsert(i, content.charAt(i));
+                        }
+                        
+                        // Update the text area
+                        updateEditorText(content);
+                        
+                        // Explicitly send document update to sync with server
+                        networkClient.sendDocumentUpdate(content);
+                        
+                        updateStatus("Loaded document: " + documentTitle);
+                    } catch (Exception e) {
+                        System.err.println("Error inserting document content: " + e.getMessage());
+                        e.printStackTrace();
+                        updateStatus("Error loading document content");
+                    }
+                } else {
+                    // Empty document
+                    updateEditorText("");
+                    updateStatus("Loaded empty document: " + documentTitle);
+                }
+            } else {
+                // No document found
+                updateStatus("Could not find document with ID: " + documentId);
+            }
+        } catch (Exception e) {
+            updateStatus("Error loading document: " + e.getMessage());
+            e.printStackTrace();
+            
+            // Reset to empty document in case of error
+            try {
+                document = new CRDTDocument(userId);
+                updateEditorText("");
+            } catch (Exception ex) {
+                System.err.println("Failed to reset document: " + ex.getMessage());
+            }
         }
     }
 } 

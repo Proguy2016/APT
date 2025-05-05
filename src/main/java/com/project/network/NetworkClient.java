@@ -283,6 +283,14 @@ public class NetworkClient {
             return;
         }
         
+        System.out.println("==================================================");
+        System.out.println("Sending join session request to server");
+        System.out.println("Session code: " + code);
+        System.out.println("Joining as: " + (isEditor ? "EDITOR" : "VIEWER"));
+        System.out.println("User ID: " + userId);
+        System.out.println("WebSocket connected: " + (webSocketClient != null && webSocketClient.isOpen()));
+        System.out.println("==================================================");
+        
         JsonObject message = new JsonObject();
         message.addProperty("type", "join_session");
         message.addProperty("userId", userId);
@@ -309,19 +317,38 @@ public class NetworkClient {
                 case "session_created":
                     String editorCode = jsonMessage.get("editorCode").getAsString();
                     String viewerCode = jsonMessage.get("viewerCode").getAsString();
+                    System.out.println("==================================================");
+                    System.out.println("Session created successfully");
+                    System.out.println("Editor code: " + editorCode);
+                    System.out.println("Viewer code: " + viewerCode);
+                    System.out.println("==================================================");
                     notifyCodeListeners(new CodePair(editorCode, viewerCode));
                     break;
                     
                 case "session_joined":
                     boolean asEditor = jsonMessage.get("asEditor").getAsBoolean();
-                    System.out.println("Joined session as " + (asEditor ? "editor" : "viewer"));
+                    String editorCodeJoined = jsonMessage.get("editorCode").getAsString();
+                    String viewerCodeJoined = jsonMessage.get("viewerCode").getAsString();
+                    
+                    System.out.println("==================================================");
+                    System.out.println("SESSION JOINED SUCCESSFULLY as " + (asEditor ? "EDITOR" : "VIEWER"));
+                    System.out.println("Editor code: " + editorCodeJoined);
+                    System.out.println("Viewer code: " + viewerCodeJoined);
+                    System.out.println("User ID: " + userId);
+                    System.out.println("==================================================");
+                    
+                    // After joining, update our code information
+                    notifyCodeListeners(new CodePair(editorCodeJoined, viewerCodeJoined));
                     
                     // After joining, immediately send our username to help other clients know who we are
-                    JsonObject usernameMessage = new JsonObject();
-                    usernameMessage.addProperty("type", "update_username");
-                    usernameMessage.addProperty("userId", userId);
-                    usernameMessage.addProperty("username", username);
-                    webSocketClient.send(gson.toJson(usernameMessage));
+                    if (username != null && !username.isEmpty()) {
+                        JsonObject usernameMessage = new JsonObject();
+                        usernameMessage.addProperty("type", "update_username");
+                        usernameMessage.addProperty("userId", userId);
+                        usernameMessage.addProperty("username", username);
+                        webSocketClient.send(gson.toJson(usernameMessage));
+                        System.out.println("Sent username update: " + username);
+                    }
                     break;
                     
                 case "presence":

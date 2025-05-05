@@ -547,6 +547,57 @@ public class DatabaseService {
     }
     
     /**
+     * Gets all documents that have a specific session code (either editor or viewer).
+     * This allows users to find documents they have access to via a session code.
+     * 
+     * @param sessionCode The session code to search for
+     * @return A list of documents matching the session code
+     */
+    public List<Document> getDocumentsBySessionCode(String sessionCode) {
+        if (useInMemoryStorage) {
+            return getDocumentsBySessionCodeInMemory(sessionCode);
+        }
+        
+        List<Document> documents = new ArrayList<>();
+        try {
+            // Check both editorCode and viewerCode fields for the given code
+            Bson filter = Filters.or(
+                Filters.eq("editorCode", sessionCode),
+                Filters.eq("viewerCode", sessionCode)
+            );
+            
+            documentsCollection.find(filter).forEach(documents::add);
+            return documents;
+        } catch (Exception e) {
+            System.err.println("Error getting documents by session code: " + e.getMessage());
+            e.printStackTrace();
+            return getDocumentsBySessionCodeInMemory(sessionCode);
+        }
+    }
+    
+    private List<Document> getDocumentsBySessionCodeInMemory(String sessionCode) {
+        List<Document> documents = new ArrayList<>();
+        for (InMemoryDocument inMemoryDoc : documentMap.values()) {
+            // Check if either code matches the session code
+            if ((inMemoryDoc.editorCode != null && inMemoryDoc.editorCode.equals(sessionCode)) ||
+                (inMemoryDoc.viewerCode != null && inMemoryDoc.viewerCode.equals(sessionCode))) {
+                
+                Document doc = new Document();
+                doc.append("_id", inMemoryDoc.id);
+                doc.append("title", inMemoryDoc.title);
+                doc.append("ownerId", inMemoryDoc.ownerId);
+                doc.append("content", inMemoryDoc.content);
+                doc.append("editorCode", inMemoryDoc.editorCode);
+                doc.append("viewerCode", inMemoryDoc.viewerCode);
+                doc.append("createdAt", inMemoryDoc.createdAt);
+                doc.append("updatedAt", inMemoryDoc.updatedAt);
+                documents.add(doc);
+            }
+        }
+        return documents;
+    }
+    
+    /**
      * Closes the MongoDB connection.
      */
     public void close() {
