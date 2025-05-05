@@ -343,16 +343,22 @@ public class EditorController {
         // Add code listener
         networkClient.addCodeListener(codes -> {
             Platform.runLater(() -> {
-                // Log the received codes
-                System.out.println("Received session codes - Editor: " + codes.getEditorCode() + ", Viewer: " + codes.getViewerCode());
+                // Add a more visible log for the codes
+                System.out.println("=====================================");
+                System.out.println("RECEIVED SESSION CODES:");
+                System.out.println("Editor code: " + codes.getEditorCode());
+                System.out.println("Viewer code: " + codes.getViewerCode());
+                System.out.println("Current user role: " + (isEditor ? "EDITOR" : "VIEWER"));
+                System.out.println("=====================================");
                 
                 // Update the UI fields based on user role
                 if (isEditor) {
+                    // Editors see both codes
                     editorCodeField.setText(codes.getEditorCode());
                     viewerCodeField.setText(codes.getViewerCode());
                 } else {
-                    // For viewers, we still store the codes but don't display the editor code
-                    // in the UI to prevent confusion
+                    // Viewers only see the viewer code
+                    editorCodeField.setText("");
                     viewerCodeField.setText(codes.getViewerCode());
                 }
                 
@@ -1957,45 +1963,30 @@ public class EditorController {
     private void completeJoinSession(String code, boolean isEditorRole) {
         try {
             // Important: Join the session with the server
-            System.out.println("Joining session with code: " + code + " as " + (isEditorRole ? "editor" : "viewer"));
-            networkClient.joinSession(code, isEditorRole);
+            System.out.println("=== JOINING SESSION ===");
+            System.out.println("Session code: " + code);
+            System.out.println("Joining as: " + (isEditorRole ? "EDITOR" : "VIEWER"));
+            System.out.println("Local user ID: " + userId);
             
-            // Update UI to show we're waiting
+            // Update our local role flag
+            isEditor = isEditorRole;
+            
+            // Update UI based on role BEFORE joining
+            editorArea.setEditable(isEditor);
             if (isEditor) {
-                editorCodeField.setText(code); // Set the editor code field for editors
-                updateStatus("Joined session as editor - waiting for content sync...");
+                updateStatus("Joining session as editor - waiting for content sync...");
             } else {
-                updateStatus("Joined session as viewer - waiting for content sync...");
-                // Hide the sharing codes for viewers
-                editorCodeField.setText("");
-                viewerCodeField.setText("");
+                updateStatus("Joining session as viewer - waiting for content sync...");
+                // Hide editing controls for viewers
+                hideEditorControls();
             }
             
-            // Wait a moment to let the session join process complete
-            new Thread(() -> {
-                try {
-                    Thread.sleep(500);
-                    
-                    // Tell the server we need content by sending a special sync request
-                    Platform.runLater(() -> {
-                        updateStatus("Requesting document sync...");
-                        
-                        // Create a special operation to request document resync
-                        Operation requestResyncOperation = 
-                            new Operation(Operation.Type.REQUEST_DOCUMENT_RESYNC, null, null, userId, -1);
-                        
-                        // Handle it directly to avoid threading issues
-                        handleRemoteOperation(requestResyncOperation);
-                    });
-                } catch (Exception e) {
-                    System.err.println("Error in sync request thread: " + e.getMessage());
-                    e.printStackTrace();
-                }
-            }).start();
+            // Now join the session on the server
+            networkClient.joinSession(code, isEditorRole);
+            
         } catch (Exception e) {
-            updateStatus("Error joining session: " + e.getMessage());
-            System.err.println("Error in completeJoinSession: " + e.getMessage());
             e.printStackTrace();
+            updateStatus("Error joining session: " + e.getMessage());
         }
     }
     
@@ -2378,11 +2369,22 @@ public class EditorController {
                 
                 // Set the editor and viewer codes in the UI
                 Platform.runLater(() -> {
-                    editorCodeField.setText(finalEditorCode);
-                    if (finalViewerCode != null && !finalViewerCode.isEmpty()) {
-                        viewerCodeField.setText(finalViewerCode);
+                    if (isOwnedByCurrentUser) {
+                        // Document owner can see both codes
+                        editorCodeField.setText(finalEditorCode);
+                        if (finalViewerCode != null && !finalViewerCode.isEmpty()) {
+                            viewerCodeField.setText(finalViewerCode);
+                        } else {
+                            viewerCodeField.setText(finalEditorCode); // Fallback to same code
+                        }
                     } else {
-                        viewerCodeField.setText(finalEditorCode);
+                        // Non-owners only see viewer code
+                        editorCodeField.setText("");
+                        if (finalViewerCode != null && !finalViewerCode.isEmpty()) {
+                            viewerCodeField.setText(finalViewerCode);
+                        } else {
+                            viewerCodeField.setText(finalEditorCode); // Fallback to same code
+                        }
                     }
                 });
                 
@@ -2412,11 +2414,12 @@ public class EditorController {
                 
                 // Join the session (always as editor if it's our document)
                 boolean joinAsEditor = isOwnedByCurrentUser;
-                System.out.println("Joining session with code " + finalEditorCode + " as " + (joinAsEditor ? "EDITOR" : "VIEWER") + 
+                String codeToUse = joinAsEditor ? finalEditorCode : (finalViewerCode != null && !finalViewerCode.isEmpty() ? finalViewerCode : finalEditorCode);
+                System.out.println("Joining session with code " + codeToUse + " as " + (joinAsEditor ? "EDITOR" : "VIEWER") + 
                                   " (document owner: " + isOwnedByCurrentUser + ")");
-                DocumentSelectionDialog.saveRecentSessionCode(finalEditorCode);
-                joinExistingSession(finalEditorCode, joinAsEditor);
-                    } else {
+                DocumentSelectionDialog.saveRecentSessionCode(codeToUse);
+                joinExistingSession(codeToUse, joinAsEditor);
+            } else {
                 // No session exists yet, create one automatically
                 System.out.println("Document has no session, creating one...");
                 
@@ -2698,5 +2701,19 @@ public class EditorController {
         } catch (Exception e) {
             System.err.println("Error checking for corruption: " + e.getMessage());
         }
+    }
+
+    /**
+     * Hides editing controls for viewer mode
+     */
+    private void hideEditorControls() {
+        // Hide or disable UI elements that should not be available to viewers
+        editorCodeField.setVisible(false);
+        viewerCodeField.setVisible(false);
+        
+        // Update UI appearance for viewer mode
+        statusLabel.setText("VIEWER MODE - Read Only");
+        statusLabel.setStyle("-fx-text-fill: #885500;");
+        editorArea.setStyle("-fx-background-color: #ffffee;");
     }
 } 

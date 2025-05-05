@@ -4,6 +4,9 @@ import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.scene.control.*;
 import javafx.scene.layout.GridPane;
+import javafx.scene.layout.VBox;
+import javafx.scene.text.Text;
+import javafx.scene.text.TextFlow;
 import javafx.util.Pair;
 
 /**
@@ -29,38 +32,64 @@ public class JoinSessionDialog extends Dialog<Pair<String, Boolean>> {
         grid.setPadding(new Insets(20, 150, 10, 10));
         
         TextField codeField = new TextField();
-        codeField.setPromptText("Session Code");
+        codeField.setPromptText("Enter session code");
         
+        // Create better labels for role selection
         ToggleGroup roleGroup = new ToggleGroup();
-        RadioButton editorButton = new RadioButton("Join as Editor (can edit)");
-        RadioButton viewerButton = new RadioButton("Join as Viewer (read-only)");
-        editorButton.setToggleGroup(roleGroup);
-        viewerButton.setToggleGroup(roleGroup);
-        editorButton.setSelected(true);
+        RadioButton editorRole = new RadioButton("Editor (can make changes)");
+        RadioButton viewerRole = new RadioButton("Viewer (read-only)");
+        editorRole.setToggleGroup(roleGroup);
+        viewerRole.setToggleGroup(roleGroup);
+        editorRole.setSelected(true);
         
+        // Add informational text
+        TextFlow infoText = new TextFlow();
+        Text helpText = new Text(
+            "When joining a session:\n" +
+            "• For EDITOR access: Use the editor code shared by the host\n" +
+            "• For VIEW-ONLY access: Use either the viewer code or editor code\n\n" +
+            "Using the wrong code for your selected role may be rejected."
+        );
+        helpText.setStyle("-fx-font-size: 12px;");
+        infoText.getChildren().add(helpText);
+        infoText.setStyle("-fx-background-color: #f8f8f8; -fx-padding: 10px; -fx-border-color: #ccc;");
+        
+        // Add fields with better labels
         grid.add(new Label("Session Code:"), 0, 0);
         grid.add(codeField, 1, 0);
-        grid.add(editorButton, 0, 1, 2, 1);
-        grid.add(viewerButton, 0, 2, 2, 1);
+        
+        VBox roleBox = new VBox(10);
+        roleBox.getChildren().addAll(
+            new Label("Select your role:"),
+            editorRole,
+            viewerRole
+        );
+        grid.add(roleBox, 0, 1, 2, 1);
+        
+        // Add help text at the bottom
+        grid.add(infoText, 0, 2, 2, 1);
+        
+        // Enable/Disable join button depending on the input
+        Button joinButton = (Button) getDialogPane().lookupButton(joinButtonType);
+        joinButton.setDisable(true);
+        
+        codeField.textProperty().addListener((observable, oldValue, newValue) -> {
+            joinButton.setDisable(newValue.trim().isEmpty());
+        });
         
         getDialogPane().setContent(grid);
         
         // Request focus on the code field by default
         Platform.runLater(codeField::requestFocus);
         
-        // Convert the result to a code/role pair when the join button is clicked
+        // Convert the result to a pair when the join button is clicked
         setResultConverter(dialogButton -> {
             if (dialogButton == joinButtonType) {
-                String code = codeField.getText().trim();
-                if (code.isEmpty()) {
-                    return null;
-                }
-                
-                boolean isEditor = editorButton.isSelected();
-                System.out.println("Join dialog returning: code=" + code + ", isEditor=" + isEditor);
-                return new Pair<>(code, isEditor);
+                return new Pair<>(codeField.getText(), editorRole.isSelected());
             }
             return null;
         });
+        
+        System.out.println("Join Session Dialog initialized");
     }
 } 

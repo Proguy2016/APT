@@ -400,42 +400,45 @@ public class NetworkClient {
      */
     public void joinSession(String code, boolean isEditor) {
         if (!connected) {
+            System.err.println("Failed to join session: Not connected to server");
             notifyErrorListeners("Not connected to server");
             return;
         }
         
-        // First, ensure our own ID is registered by re-registering
-        JsonObject registerMsg = new JsonObject();
-        registerMsg.addProperty("type", "register");
-        registerMsg.addProperty("userId", userId);
-        if (username != null && !username.isEmpty()) {
-            registerMsg.addProperty("username", username);
-        }
-        webSocketClient.send(gson.toJson(registerMsg));
-        
-        System.out.println("==================================================");
-        System.out.println("Sending join session request to server");
-        System.out.println("Session code: " + code);
-        System.out.println("Joining as: " + (isEditor ? "EDITOR" : "VIEWER"));
-        System.out.println("User ID: " + userId);
-        System.out.println("Username: " + username);
-        System.out.println("WebSocket connected: " + (webSocketClient != null && webSocketClient.isOpen()));
-        System.out.println("==================================================");
-        
-        JsonObject message = new JsonObject();
-        message.addProperty("type", "join_session");
-        message.addProperty("userId", userId);
-        message.addProperty("code", code); // Use code for backward compatibility
-        message.addProperty("asEditor", isEditor);
-        
         try {
-            String jsonMessage = gson.toJson(message);
-            System.out.println("Sending join message: " + jsonMessage);
-            webSocketClient.send(jsonMessage);
+            // First, ensure our own ID is registered by re-registering
+            JsonObject registerMsg = new JsonObject();
+            registerMsg.addProperty("type", "register");
+            registerMsg.addProperty("userId", userId);
+            if (username != null && !username.isEmpty()) {
+                registerMsg.addProperty("username", username);
+            }
+            webSocketClient.send(gson.toJson(registerMsg));
+            
+            System.out.println("=================================================");
+            System.out.println("JOIN SESSION REQUEST:");
+            System.out.println("Code: " + code);
+            System.out.println("Role: " + (isEditor ? "EDITOR" : "VIEWER"));
+            System.out.println("User ID: " + userId);
+            System.out.println("=================================================");
+            
+            // Create and send the join message
+            JsonObject joinMsg = new JsonObject();
+            joinMsg.addProperty("type", "join_session");
+            joinMsg.addProperty("code", code);
+            joinMsg.addProperty("asEditor", isEditor);  
+            joinMsg.addProperty("userId", userId);
+            if (username != null && !username.isEmpty()) {
+                joinMsg.addProperty("username", username);
+            }
+            
+            // Send the join request
+            webSocketClient.send(gson.toJson(joinMsg));
+            System.out.println("Join request sent to server");
         } catch (Exception e) {
-            System.err.println("ERROR SENDING JOIN REQUEST: " + e.getMessage());
+            System.err.println("Exception in joinSession: " + e.getMessage());
             e.printStackTrace();
-            notifyErrorListeners("Failed to send join request: " + e.getMessage());
+            notifyErrorListeners("Error joining session: " + e.getMessage());
         }
     }
     
@@ -460,10 +463,24 @@ public class NetworkClient {
                     
                 case "create_session_ack":
                     System.out.println("Create session acknowledged by server");
-                    String editorCode = jsonMessage.get("sessionId").getAsString();
                     
-                    // For simplicity, use the same code for both editor and viewer
-                    String viewerCode = editorCode;
+                    // Get editor and viewer codes from response
+                    String editorCode, viewerCode;
+                    
+                    if (jsonMessage.has("editorCode") && jsonMessage.has("viewerCode")) {
+                        // New format with separate codes
+                        editorCode = jsonMessage.get("editorCode").getAsString();
+                        viewerCode = jsonMessage.get("viewerCode").getAsString();
+                        System.out.println("Received distinct editor and viewer codes - Editor: " + editorCode + ", Viewer: " + viewerCode);
+                    } else if (jsonMessage.has("sessionId")) {
+                        // Legacy format with same code for both
+                        editorCode = jsonMessage.get("sessionId").getAsString();
+                        viewerCode = editorCode;
+                        System.out.println("Received legacy session code: " + editorCode);
+                    } else {
+                        System.err.println("Invalid create_session_ack response - missing codes");
+                        break;
+                    }
                     
                     // Notify listeners of the received codes
                     CodePair codePair = new CodePair(editorCode, viewerCode);
@@ -474,6 +491,20 @@ public class NetworkClient {
                     System.out.println("Join session acknowledged by server");
                     boolean asEditor = jsonMessage.has("asEditor") && jsonMessage.get("asEditor").getAsBoolean();
                     System.out.println("Joined as: " + (asEditor ? "EDITOR" : "VIEWER"));
+                    
+                    // Extract editor and viewer codes if provided
+                    if (jsonMessage.has("editorCode")) {
+                        String joinEditorCode = jsonMessage.get("editorCode").getAsString();
+                        String joinViewerCode = jsonMessage.has("viewerCode") ? 
+                            jsonMessage.get("viewerCode").getAsString() : joinEditorCode;
+                        
+                        System.out.println("Received session codes in join response:");
+                        System.out.println("  Editor code: " + joinEditorCode);
+                        System.out.println("  Viewer code: " + joinViewerCode);
+                        
+                        // Notify code listeners with the received codes
+                        notifyCodeListeners(new CodePair(joinEditorCode, joinViewerCode));
+                    }
                     
                     if (jsonMessage.has("documentContent")) {
                         String documentContent = jsonMessage.get("documentContent").getAsString();

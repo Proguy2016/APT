@@ -237,37 +237,40 @@ public class CollaborativeEditorServer extends WebSocketServer {
             return;
         }
         
-        String sessionId = UUID.randomUUID().toString().substring(0, 6);
-        String documentTitle = message.has("title") ? message.get("title").getAsString() : "Untitled Document";
+        // Generate unique codes for editor and viewer
+        String editorCode = UUID.randomUUID().toString().substring(0, 6);
+        String viewerCode = UUID.randomUUID().toString().substring(0, 6);
         
-        // Create a new session with the same code for both editor and viewer for simplicity
-        EditorSession session = new EditorSession(sessionId, sessionId);
-        
-        // Add user as the initial editor
-        session.addEditor(userId);
-        
-        // Store the session
-        sessionsByCode.put(sessionId, session);
-        
-        // Associate the user with the session
-        userSessions.put(userId, session);
-        
-        // Set document title if provided
-        if (message.has("initialContent")) {
-            String initialContent = message.get("initialContent").getAsString();
-            session.setDocumentContent(initialContent);
-            System.out.println("Created session with initial content: " + initialContent.length() + " chars");
+        // Make sure the codes are different
+        while (editorCode.equals(viewerCode)) {
+            viewerCode = UUID.randomUUID().toString().substring(0, 6);
         }
         
-        // Send acknowledgment
+        // Store document title in the response only
+        String documentTitle = message.has("title") ? message.get("title").getAsString() : "Untitled Document";
+        
+        // Create a new session
+        EditorSession session = new EditorSession(editorCode, viewerCode);
+        
+        // Add the session to our maps
+        sessionsByCode.put(editorCode, session);
+        sessionsByCode.put(viewerCode, session);
+        
+        // Add the creator as an editor
+        session.addEditor(userId);
+        userSessions.put(userId, session);
+        
+        System.out.println("Created session with codes - Editor: " + editorCode + ", Viewer: " + viewerCode);
+        
+        // Send acknowledgement to client with session details
         JsonObject response = new JsonObject();
         response.addProperty("type", "create_session_ack");
-        response.addProperty("sessionId", sessionId);
+        response.addProperty("editorCode", editorCode);
+        response.addProperty("viewerCode", viewerCode);
+        response.addProperty("userId", userId);
         response.addProperty("documentTitle", documentTitle);
         
         conn.send(gson.toJson(response));
-        
-        System.out.println("User " + userId + " created session with ID " + sessionId);
         
         // Broadcast presence update
         broadcastPresenceUpdate(session);
@@ -283,27 +286,32 @@ public class CollaborativeEditorServer extends WebSocketServer {
             return;
         }
         
-        // Check if we're joining with the old format (code) or new format (sessionId)
-        String sessionId;
+        // Get the session code from the request
+        String sessionCode;
         if (message.has("code")) {
-            sessionId = message.get("code").getAsString();
+            sessionCode = message.get("code").getAsString();
         } else if (message.has("sessionId")) {
-            sessionId = message.get("sessionId").getAsString();
+            sessionCode = message.get("sessionId").getAsString();
         } else {
             sendError(conn, "Missing session identifier");
             return;
         }
         
-        System.out.println("User " + userId + " is joining session " + sessionId);
+        // Get the requested role
+        boolean requestingEditorRole = message.has("asEditor") && message.get("asEditor").getAsBoolean();
+        
+        System.out.println("=== JOIN SESSION REQUEST ===");
+        System.out.println("User: " + userId);
+        System.out.println("Code: " + sessionCode);
+        System.out.println("Requesting role: " + (requestingEditorRole ? "EDITOR" : "VIEWER"));
         
         // Check if user is already in a session and remove them from it
         EditorSession currentSession = userSessions.get(userId);
-        if (currentSession != null && !currentSession.getEditorCode().equals(sessionId) && 
-            !currentSession.getViewerCode().equals(sessionId)) {
-            // User is joining a different session, remove from current one
-            System.out.println("User " + userId + " is leaving previous session " + 
-                currentSession.getEditorCode() + " to join " + sessionId);
+        if (currentSession != null && 
+            !currentSession.getEditorCode().equals(sessionCode) && 
+            !currentSession.getViewerCode().equals(sessionCode)) {
             
+            System.out.println("User is leaving previous session to join new one");
             currentSession.removeUser(userId);
             
             // If the session is now empty, remove it
@@ -317,38 +325,61 @@ public class CollaborativeEditorServer extends WebSocketServer {
             }
         }
         
-        // Get or create the session
-        final EditorSession session;
-        EditorSession existingSession = sessionsByCode.get(sessionId);
-        if (existingSession == null) {
-            // Create a new session if it doesn't exist - makes joining more reliable
-            System.out.println("Session not found, creating new session: " + sessionId);
-            session = new EditorSession(sessionId, sessionId);
-            sessionsByCode.put(sessionId, session);
-        } else {
-            session = existingSession;
-        }
+        // Get the session associated with the code
+        EditorSession session = sessionsByCode.get(sessionCode);
         
-        // Check if joining as editor or viewer
-        boolean asEditor = message.has("asEditor") && message.get("asEditor").getAsBoolean();
-        System.out.println("User " + userId + " is joining as " + (asEditor ? "EDITOR" : "VIEWER"));
-        
-        // Check authorization - verify the user is allowed to join as an editor if they requested that role
-        // Only editors need authorization checks - viewers can join with either code
-        if (asEditor && !sessionId.equals(session.getEditorCode())) {
-            sendError(conn, "Not authorized to join as editor with this code");
-            System.out.println("User " + userId + " tried to join as editor but used viewer code");
+        // If session doesn't exist, create a new one
+        if (session == null) {
+            System.out.println("Session not found, creating new session with code: " + sessionCode);
+            
+            // For backwards compatibility, use the same code for editor and viewer
+            String editorCode = sessionCode;
+            String viewerCode = sessionCode;
+            
+            // Create a new session with the provided code
+            session = new EditorSession(editorCode, viewerCode);
+            
+            // Register the session with both codes for lookup
+            sessionsByCode.put(editorCode, session);
+            
+            // If the codes are different, register with both
+            if (!editorCode.equals(viewerCode)) {
+                sessionsByCode.put(viewerCode, session);
+            }
+            
+            // Add the user as an editor since they're creating it
+            session.addEditor(userId);
+            userSessions.put(userId, session);
+            
+            // Send success response
+            sendJoinResponse(conn, userId, session, true);
             return;
         }
         
-        // Add user to session based on role
-        if (asEditor) {
-            session.addEditor(userId);
+        // Determine the actual role based on the code and requested role
+        boolean assignedEditorRole;
+        
+        if (requestingEditorRole) {
+            // Editor role requested - check if using editor code
+            if (sessionCode.equals(session.getEditorCode())) {
+                // Using editor code, grant editor role
+                assignedEditorRole = true;
+                session.addEditor(userId);
+                System.out.println("Granted EDITOR role (requested + using editor code)");
+            } else {
+                // Using viewer code but requested editor role - deny
+                sendError(conn, "Cannot join as editor using viewer code");
+                System.out.println("Denied EDITOR role (using viewer code)");
+                return;
+            }
         } else {
+            // Viewer role requested - always grant
+            assignedEditorRole = false;
             session.addViewer(userId);
+            System.out.println("Granted VIEWER role (as requested)");
         }
         
-        // Add session to user's sessions
+        // Associate the user with the session
         userSessions.put(userId, session);
         
         // Get username if provided
@@ -360,6 +391,14 @@ public class CollaborativeEditorServer extends WebSocketServer {
             }
         }
         
+        // Send success response
+        sendJoinResponse(conn, userId, session, assignedEditorRole);
+    }
+    
+    /**
+     * Sends a successful join response to the client
+     */
+    private void sendJoinResponse(WebSocket conn, String userId, EditorSession session, boolean isEditor) {
         // Create a proper usernames object with full usernames
         JsonObject usernamesObject = new JsonObject();
         for (String user : session.getAllUsers()) {
@@ -370,14 +409,18 @@ public class CollaborativeEditorServer extends WebSocketServer {
             }
         }
         
-        // Send acknowledgment to the joining user with document content
+        // Send response with all needed info
         JsonObject response = new JsonObject();
         response.addProperty("type", "join_session_ack");
         response.addProperty("userId", userId);
-        response.addProperty("asEditor", asEditor);
+        response.addProperty("asEditor", isEditor);
+        response.addProperty("editorCode", session.getEditorCode());
+        response.addProperty("viewerCode", session.getViewerCode());
         response.addProperty("documentContent", session.getDocumentContent());
         response.add("usernames", usernamesObject);
+        
         conn.send(gson.toJson(response));
+        System.out.println("Sent join confirmation to user " + userId + " as " + (isEditor ? "EDITOR" : "VIEWER"));
         
         // Broadcast presence update to all users in the session
         broadcastPresenceUpdate(session);
