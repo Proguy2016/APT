@@ -448,38 +448,33 @@ public class NetworkClient {
             JsonObject jsonMessage = gson.fromJson(message, JsonObject.class);
             String type = jsonMessage.get("type").getAsString();
             
+            System.out.println("Received message from server: type=" + type);
+            
             switch (type) {
                 case "register_ack":
-                    System.out.println("Registered with server as " + jsonMessage.get("userId").getAsString());
-                    // Notify connection listeners
-                    notifyConnectionListeners(true);
-                    break;
-                    
-                case "session_created":
-                    String editorCode = jsonMessage.get("editorCode").getAsString();
-                    String viewerCode = jsonMessage.get("viewerCode").getAsString();
-                    System.out.println("==================================================");
-                    System.out.println("Session created successfully");
-                    System.out.println("Editor code: " + editorCode);
-                    System.out.println("Viewer code: " + viewerCode);
-                    System.out.println("==================================================");
-                    notifyCodeListeners(new CodePair(editorCode, viewerCode));
+                    System.out.println("Registration acknowledged by server");
+                    // Registration successful, we can proceed with other operations
+                    // Start a thread to clean the sync history periodically
+                    startSyncHistoryCleaner();
                     break;
                     
                 case "create_session_ack":
-                    String sessionId = jsonMessage.get("sessionId").getAsString();
-                    System.out.println("==================================================");
-                    System.out.println("Session created successfully with new format");
-                    System.out.println("Session ID: " + sessionId);
-                    System.out.println("==================================================");
-                    notifyCodeListeners(new CodePair(sessionId, sessionId));
+                    System.out.println("Create session acknowledged by server");
+                    String editorCode = jsonMessage.get("sessionId").getAsString();
+                    
+                    // For simplicity, use the same code for both editor and viewer
+                    String viewerCode = editorCode;
+                    
+                    // Notify listeners of the received codes
+                    CodePair codePair = new CodePair(editorCode, viewerCode);
+                    notifyCodeListeners(codePair);
                     break;
                     
                 case "join_session_ack":
-                    System.out.println("==================================================");
-                    System.out.println("SESSION JOINED SUCCESSFULLY");
+                    System.out.println("Join session acknowledged by server");
+                    boolean asEditor = jsonMessage.has("asEditor") && jsonMessage.get("asEditor").getAsBoolean();
+                    System.out.println("Joined as: " + (asEditor ? "EDITOR" : "VIEWER"));
                     
-                    // Check if document content is included
                     if (jsonMessage.has("documentContent")) {
                         String documentContent = jsonMessage.get("documentContent").getAsString();
                         System.out.println("Document content received: " + documentContent.length() + " characters");
@@ -497,7 +492,7 @@ public class NetworkClient {
                         // Notify immediately
                         notifyOperationListeners(syncOperation);
                     } else {
-                        System.out.println("No document content in join response");
+                        System.out.println("No document content in join response - will need to request sync");
                     }
                     
                     // Get any usernames provided
@@ -518,17 +513,15 @@ public class NetworkClient {
                             System.err.println("Error processing usernames: " + e.getMessage());
                         }
                     }
-                    
-                    System.out.println("==================================================");
                     break;
                     
                 case "session_joined":
-                    boolean asEditor = jsonMessage.get("asEditor").getAsBoolean();
+                    boolean asEditorJoined = jsonMessage.get("asEditor").getAsBoolean();
                     String editorCodeJoined = jsonMessage.get("editorCode").getAsString();
                     String viewerCodeJoined = jsonMessage.get("viewerCode").getAsString();
                     
                     System.out.println("==================================================");
-                    System.out.println("SESSION JOINED SUCCESSFULLY as " + (asEditor ? "EDITOR" : "VIEWER"));
+                    System.out.println("SESSION JOINED SUCCESSFULLY as " + (asEditorJoined ? "EDITOR" : "VIEWER"));
                     System.out.println("Editor code: " + editorCodeJoined);
                     System.out.println("Viewer code: " + viewerCodeJoined);
                     System.out.println("User ID: " + userId);

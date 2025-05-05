@@ -32,8 +32,8 @@ public class JoinSessionDialog extends Dialog<Pair<String, Boolean>> {
         codeField.setPromptText("Session Code");
         
         ToggleGroup roleGroup = new ToggleGroup();
-        RadioButton editorButton = new RadioButton("Join as Editor");
-        RadioButton viewerButton = new RadioButton("Join as Viewer");
+        RadioButton editorButton = new RadioButton("Join as Editor (can edit)");
+        RadioButton viewerButton = new RadioButton("Join as Viewer (read-only)");
         editorButton.setToggleGroup(roleGroup);
         viewerButton.setToggleGroup(roleGroup);
         editorButton.setSelected(true);
@@ -51,14 +51,13 @@ public class JoinSessionDialog extends Dialog<Pair<String, Boolean>> {
         // Convert the result to a code/role pair when the join button is clicked
         setResultConverter(dialogButton -> {
             if (dialogButton == joinButtonType) {
-                String code = codeField.getText();
-                boolean isEditor = editorButton.isSelected();
-                
-                // Basic validation
-                if (code == null || code.trim().isEmpty()) {
+                String code = codeField.getText().trim();
+                if (code.isEmpty()) {
                     return null;
                 }
                 
+                boolean isEditor = editorButton.isSelected();
+                System.out.println("Join dialog returning: code=" + code + ", isEditor=" + isEditor);
                 return new Pair<>(code, isEditor);
             }
             return null;

@@ -920,8 +920,9 @@ public class EditorController {
                         updateStatus("Joining existing session: " + existingSessionCode);
                         
                         // Join the existing session as an editor
-                        networkClient.joinSession(existingSessionCode, true);
-                        isEditor = true;
+                        boolean isEditorRole = true;
+                        networkClient.joinSession(existingSessionCode, isEditorRole);
+                        isEditor = isEditorRole;
                         
                         // Update the editor code field
                         editorCodeField.setText(existingSessionCode);

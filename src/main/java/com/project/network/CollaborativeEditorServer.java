@@ -331,8 +331,10 @@ public class CollaborativeEditorServer extends WebSocketServer {
         
         // Check if joining as editor or viewer
         boolean asEditor = message.has("asEditor") && message.get("asEditor").getAsBoolean();
+        System.out.println("User " + userId + " is joining as " + (asEditor ? "EDITOR" : "VIEWER"));
         
         // Check authorization - verify the user is allowed to join as an editor if they requested that role
+        // Only editors need authorization checks - viewers can join with either code
         if (asEditor && !sessionId.equals(session.getEditorCode())) {
             sendError(conn, "Not authorized to join as editor with this code");
             System.out.println("User " + userId + " tried to join as editor but used viewer code");
@@ -361,68 +363,24 @@ public class CollaborativeEditorServer extends WebSocketServer {
         // Create a proper usernames object with full usernames
         JsonObject usernamesObject = new JsonObject();
         for (String user : session.getAllUsers()) {
-            // Get the username for this user, with a fallback
-            String username = usernames.get(user);
-            if (username == null || username.isEmpty()) {
-                // Generate a nicer anonymous name if no username is available
-                username = "User-" + user.substring(0, Math.min(6, user.length()));
+            if (usernames.containsKey(user)) {
+                usernamesObject.addProperty(user, usernames.get(user));
+            } else {
+                usernamesObject.addProperty(user, "User-" + user.substring(0, 4));
             }
-            usernamesObject.addProperty(user, username);
         }
         
-        // Create the join response
+        // Send acknowledgment to the joining user with document content
         JsonObject response = new JsonObject();
         response.addProperty("type", "join_session_ack");
-        response.addProperty("sessionId", sessionId);
-        
-        // Send document content if available
-        String documentContent = session.getDocument();
-        if (documentContent != null && !documentContent.isEmpty()) {
-            System.out.println("Sending document content to new user (" + documentContent.length() + " characters)");
-            response.addProperty("documentContent", documentContent);
-        } else {
-            System.out.println("No document content available for session " + sessionId);
-        }
-        
-        // Add usernames to response
+        response.addProperty("userId", userId);
+        response.addProperty("asEditor", asEditor);
+        response.addProperty("documentContent", session.getDocumentContent());
         response.add("usernames", usernamesObject);
-        
-        // Send the join response to the client that joined
         conn.send(gson.toJson(response));
         
-        // Force immediate username broadcast to ensure all clients have current info
-        broadcastUsernames(session);
-        
-        // Then broadcast presence update to all participants
+        // Broadcast presence update to all users in the session
         broadcastPresenceUpdate(session);
-        
-        // After a delay, do another set of presence broadcasts to ensure everyone is in sync
-        final String finalUserId = userId;
-        final EditorSession finalSession = session;
-        new Thread(() -> {
-            try {
-                // Wait a short time to allow initial setup to complete
-                Thread.sleep(500);
-                
-                // Second broadcast of usernames
-                broadcastUsernames(finalSession);
-                
-                // Second broadcast of presence
-                broadcastPresenceUpdate(finalSession);
-                
-                // Send a direct presence update to the newly joined user
-                sendPresenceToUser(finalUserId, finalSession);
-                
-                // Special high-priority presence update to all existing users
-                sendHighPriorityPresenceUpdate(finalSession, finalUserId);
-                
-                // After another delay, do one final presence update
-                Thread.sleep(500);
-                broadcastPresenceUpdate(finalSession);
-            } catch (Exception e) {
-                System.err.println("Error during delayed presence update: " + e.getMessage());
-            }
-        }).start();
     }
     
     /**
