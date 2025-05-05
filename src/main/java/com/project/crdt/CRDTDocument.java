@@ -57,23 +57,82 @@ public class CRDTDocument {
     /**
      * Deletes a character at the specified index.
      * @param index The index to delete at.
-     * @return The CRDT character that was deleted.
+     * @return The CRDT character that was deleted, or null if deletion was not possible.
      */
     public CRDTCharacter localDelete(int index) {
-        if (index < 0 || index >= characters.size()) {
-            throw new IndexOutOfBoundsException("Invalid index: " + index);
+        // Safety checks
+        if (characters.isEmpty()) {
+            System.err.println("Cannot delete from empty document");
+            return null;
         }
         
-        CRDTCharacter character = getCharacterAtIndex(index);
+        if (index < 0 || index >= characters.size()) {
+            System.err.println("Delete attempted with invalid index: " + index + 
+                            " (document size: " + characters.size() + ")");
+            return null;
+        }
         
-        if (character != null) {
-            characters.remove(character);
+        try {
+            CRDTCharacter character = getCharacterAtIndex(index);
             
-            // Add to history
-            Operation deleteOperation = new Operation(OperationType.DELETE, character);
-            addToHistory(deleteOperation);
+            if (character != null) {
+                characters.remove(character);
+                
+                // Add to history
+                Operation deleteOperation = new Operation(OperationType.DELETE, character);
+                addToHistory(deleteOperation);
+                
+                return character;
+            } else {
+                System.err.println("Character at index " + index + " is null, cannot delete");
+                
+                // Try a different approach if the normal lookup fails
+                // This is a fallback recovery mechanism
+                if (index >= 0 && index < characters.size()) {
+                    // Try to get the character by iterating through the set
+                    int i = 0;
+                    for (CRDTCharacter c : characters) {
+                        if (i == index) {
+                            // Found the character, now remove it
+                            characters.remove(c);
+                            
+                            // Add to history
+                            Operation deleteOperation = new Operation(OperationType.DELETE, c);
+                            addToHistory(deleteOperation);
+                            
+                            System.out.println("Successfully deleted character using fallback method");
+                            return c;
+                        }
+                        i++;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Error during deletion: " + e.getMessage());
+            e.printStackTrace();
             
-            return character;
+            // Additional recovery attempt if there was an exception
+            try {
+                if (index >= 0 && index < characters.size()) {
+                    // Get an array of characters for safer access
+                    CRDTCharacter[] charArray = characters.toArray(new CRDTCharacter[0]);
+                    if (index < charArray.length) {
+                        CRDTCharacter charToDelete = charArray[index];
+                        if (charToDelete != null) {
+                            characters.remove(charToDelete);
+                            
+                            // Add to history
+                            Operation deleteOperation = new Operation(OperationType.DELETE, charToDelete);
+                            addToHistory(deleteOperation);
+                            
+                            System.out.println("Successfully deleted character using array recovery method");
+                            return charToDelete;
+                        }
+                    }
+                }
+            } catch (Exception ex) {
+                System.err.println("Recovery attempt also failed: " + ex.getMessage());
+            }
         }
         
         return null;

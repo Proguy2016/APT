@@ -246,10 +246,22 @@ public class EditorController {
                 return;
             }
             
-            char c = event.getCharacter().charAt(0);
+            // Get the character typed
+            String ch = event.getCharacter();
+            if (ch == null || ch.isEmpty()) {
+                return;
+            }
             
-            // Ignore control characters (e.g., backspace, delete)
-            if (c < 32) {
+            char c = ch.charAt(0);
+            
+            // Ignore control characters (e.g., backspace, delete) and other non-printable characters
+            if (c < 32 && c != '\t') {
+                return;
+            }
+            
+            // Add additional safety check for other potentially problematic characters
+            if (c >= 127 && c <= 159) { // Extended ASCII control characters
+                event.consume();
                 return;
             }
             
@@ -461,8 +473,25 @@ public class EditorController {
                 // Reset the UI first to show the sync is happening
                 updateEditorText("");
                 
+                // Clean the content - remove any control characters or problematic characters
+                // that might be causing issues
+                if (content != null && !content.isEmpty()) {
+                    StringBuilder cleanContent = new StringBuilder(content.length());
+                    for (int i = 0; i < content.length(); i++) {
+                        char c = content.charAt(i);
+                        // Only keep visible characters and standard whitespace (space, tab, newline)
+                        if (c >= 32 || c == '\t' || c == '\n' || c == '\r') {
+                            cleanContent.append(c);
+                        } else {
+                            System.out.println("Removed control character at position " + i + 
+                                               ": code=" + (int)c);
+                        }
+                    }
+                    content = cleanContent.toString();
+                }
+                
                 // Insert each character
-                if (!content.isEmpty()) {
+                if (content != null && !content.isEmpty()) {
                     // Insert all characters at once rather than one by one
                     for (int i = 0; i < content.length(); i++) {
                         document.localInsert(i, content.charAt(i));
@@ -677,27 +706,93 @@ public class EditorController {
     }
     
     private void handleBackspace() {
-        int caretPosition = editorArea.getCaretPosition();
-        if (caretPosition > 0) {
-            CRDTCharacter deletedChar = document.localDelete(caretPosition - 1);
-            if (deletedChar != null) {
-                networkClient.sendDelete(deletedChar.getPosition());
+        if (!isEditor) {
+            return; // Don't allow editing if not an editor
+        }
+        
+        try {
+            int caretPosition = editorArea.getCaretPosition();
+            if (caretPosition > 0) {
+                // First update UI for responsiveness
+                String text = editorArea.getText();
                 
-                // Update the text area with the document's current text
+                // Make sure we're not at the beginning of the document
+                if (text.isEmpty() || caretPosition <= 0) {
+                    return;
+                }
+                
+                // Safety check for text length
+                if (caretPosition > text.length()) {
+                    caretPosition = text.length();
+                }
+                
+                // Try to delete the character from the CRDT document
+                CRDTCharacter deletedChar = document.localDelete(caretPosition - 1);
+                
+                if (deletedChar != null) {
+                    // If successful, send the delete operation to the network
+                    networkClient.sendDelete(deletedChar.getPosition());
+                    
+                    // Update the text area with the document's current text
+                    updateEditorText(document.getText());
+                } else {
+                    // If deletion failed in CRDT, do a forced UI update to sync with internal state
+                    String currentDocText = document.getText();
+                    updateEditorText(currentDocText);
+                    System.err.println("Backspace failed - forced text resync");
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Error handling backspace: " + e.getMessage());
+            e.printStackTrace();
+            
+            // Force UI update to match internal state
+            try {
                 updateEditorText(document.getText());
+            } catch (Exception ex) {
+                System.err.println("Failed to update UI after error: " + ex.getMessage());
             }
         }
     }
     
     private void handleDelete() {
-        int caretPosition = editorArea.getCaretPosition();
-        if (caretPosition < editorArea.getText().length()) {
+        if (!isEditor) {
+            return; // Don't allow editing if not an editor
+        }
+        
+        try {
+            int caretPosition = editorArea.getCaretPosition();
+            String text = editorArea.getText();
+            
+            // Safety checks
+            if (text.isEmpty() || caretPosition >= text.length()) {
+                return;
+            }
+            
+            // Try to delete the character from the CRDT document
             CRDTCharacter deletedChar = document.localDelete(caretPosition);
+            
             if (deletedChar != null) {
+                // If successful, send the delete operation to the network
                 networkClient.sendDelete(deletedChar.getPosition());
                 
                 // Update the text area with the document's current text
                 updateEditorText(document.getText());
+            } else {
+                // If deletion failed in CRDT, do a forced UI update to sync with internal state
+                String currentDocText = document.getText();
+                updateEditorText(currentDocText);
+                System.err.println("Delete failed - forced text resync");
+            }
+        } catch (Exception e) {
+            System.err.println("Error handling delete: " + e.getMessage());
+            e.printStackTrace();
+            
+            // Force UI update to match internal state
+            try {
+                updateEditorText(document.getText());
+            } catch (Exception ex) {
+                System.err.println("Failed to update UI after error: " + ex.getMessage());
             }
         }
     }
@@ -806,62 +901,67 @@ public class EditorController {
             return;
         }
         
+        // Process any pending batch inserts first
+        processBatchInserts();
+        
         if (document != null) {
-            // Get the operation that will be undone
-            Operation undoOperation = document.peekUndo();
-            if (undoOperation == null) {
-                updateStatus("Nothing to undo");
-                return;
-            }
+            try {
+                // Get the operation that will be undone
+                Operation undoOperation = document.peekUndo();
+                if (undoOperation == null) {
+                    updateStatus("Nothing to undo");
+                    return;
+                }
 
-            // Store the original content
-            String oldContent = document.getText();
-            
-            // Perform the undo
-            boolean undone = document.undo();
-            if (undone) {
-                // Get latest text
-                String newContent = document.getText();
+                // Store the original content
+                String oldContent = document.getText();
                 
-                // Update the UI
-                updateEditorText(newContent);
-                
-                // Now explicitly send the exact operation that was undone
-                // This way it will be processed exactly like a regular insert or delete
-                if (undoOperation.getType() == Operation.Type.INSERT) {
-                    // Undoing an insert means we need to delete that character
-                    if (networkClient != null && undoOperation.getPosition() != null) {
-                        networkClient.sendDelete(undoOperation.getPosition());
+                // Perform the undo
+                boolean undone = document.undo();
+                if (undone) {
+                    // Get latest text
+                    String newContent = document.getText();
+                    
+                    // Update the UI
+                    updateEditorText(newContent);
+                    
+                    // Now explicitly send the exact operation that was undone
+                    // This way it will be processed exactly like a regular insert or delete
+                    if (undoOperation.getType() == Operation.Type.INSERT) {
+                        // Undoing an insert means we need to delete that character
+                        if (networkClient != null && undoOperation.getPosition() != null) {
+                            networkClient.sendDelete(undoOperation.getPosition());
+                        }
+                    } else if (undoOperation.getType() == Operation.Type.DELETE) {
+                        // Undoing a delete means we need to insert that character
+                        if (networkClient != null && undoOperation.getCharacter() != null) {
+                            networkClient.sendInsert(undoOperation.getCharacter());
+                        }
                     }
-                } else if (undoOperation.getType() == Operation.Type.DELETE) {
-                    // Undoing a delete means we need to insert that character
-                    if (networkClient != null && undoOperation.getCharacter() != null) {
-                        networkClient.sendInsert(undoOperation.getCharacter());
-                    }
+                    
+                    // Also send a backup full document update with high priority
+                    sendUndoRedoFullDocumentUpdate(newContent, "undo");
+                    
+                    updateStatus("Undo operation");
+                } else {
+                    updateStatus("Nothing to undo - or undo failed");
+                    
+                    // Force a document sync to ensure consistency
+                    String currentContent = document.getText();
+                    networkClient.sendDocumentUpdate(currentContent);
                 }
+            } catch (Exception e) {
+                System.err.println("Error performing undo: " + e.getMessage());
+                e.printStackTrace();
+                updateStatus("Error during undo: " + e.getMessage());
                 
-                // Also send a backup full document update with high priority
-                if (networkClient != null && networkClient.getWebSocketClient() != null) {
-                    try {
-                        // Create a specialized message with HIGH_PRIORITY
-                        JsonObject message = new JsonObject();
-                        message.addProperty("type", "instant_document_update");
-                        message.addProperty("userId", userId);
-                        message.addProperty("username", username);
-                        message.addProperty("content", newContent);
-                        message.addProperty("operation", "undo");
-                        message.addProperty("highPriority", true);
-                        message.addProperty("timestamp", System.currentTimeMillis());
-                        
-                        networkClient.getWebSocketClient().send(new Gson().toJson(message));
-                    } catch (Exception e) {
-                        System.err.println("Error sending undo sync: " + e.getMessage());
-                    }
+                // Try to recover from the error by forcing a document update
+                try {
+                    String currentContent = document.getText();
+                    networkClient.sendDocumentUpdate(currentContent);
+                } catch (Exception ex) {
+                    System.err.println("Could not recover from undo error: " + ex.getMessage());
                 }
-                
-                updateStatus("Undo operation");
-            } else {
-                updateStatus("Nothing to undo");
             }
         }
     }
@@ -877,62 +977,94 @@ public class EditorController {
             return;
         }
         
+        // Process any pending batch inserts first
+        processBatchInserts();
+        
         if (document != null) {
-            // Get the operation that will be redone
-            Operation redoOperation = document.peekRedo();
-            if (redoOperation == null) {
-                updateStatus("Nothing to redo");
-                return;
-            }
+            try {
+                // Get the operation that will be redone
+                Operation redoOperation = document.peekRedo();
+                if (redoOperation == null) {
+                    updateStatus("Nothing to redo");
+                    return;
+                }
 
-            // Store the original content
-            String oldContent = document.getText();
-            
-            // Perform the redo
-            boolean redone = document.redo();
-            if (redone) {
-                // Get latest text
-                String newContent = document.getText();
+                // Store the original content
+                String oldContent = document.getText();
                 
-                // Update the UI
-                updateEditorText(newContent);
-                
-                // Now explicitly send the exact operation that was redone
-                // This way it will be processed exactly like a regular insert or delete
-                if (redoOperation.getType() == Operation.Type.INSERT) {
-                    // Redoing an insert means we need to insert that character
-                    if (networkClient != null && redoOperation.getCharacter() != null) {
-                        networkClient.sendInsert(redoOperation.getCharacter());
+                // Perform the redo
+                boolean redone = document.redo();
+                if (redone) {
+                    // Get latest text
+                    String newContent = document.getText();
+                    
+                    // Update the UI
+                    updateEditorText(newContent);
+                    
+                    // Now explicitly send the exact operation that was redone
+                    // This way it will be processed exactly like a regular insert or delete
+                    if (redoOperation.getType() == Operation.Type.INSERT) {
+                        // Redoing an insert means we need to insert that character
+                        if (networkClient != null && redoOperation.getCharacter() != null) {
+                            networkClient.sendInsert(redoOperation.getCharacter());
+                        }
+                    } else if (redoOperation.getType() == Operation.Type.DELETE) {
+                        // Redoing a delete means we need to delete that character
+                        if (networkClient != null && redoOperation.getPosition() != null) {
+                            networkClient.sendDelete(redoOperation.getPosition());
+                        }
                     }
-                } else if (redoOperation.getType() == Operation.Type.DELETE) {
-                    // Redoing a delete means we need to delete that character
-                    if (networkClient != null && redoOperation.getPosition() != null) {
-                        networkClient.sendDelete(redoOperation.getPosition());
-                    }
+                    
+                    // Also send a backup full document update with high priority
+                    sendUndoRedoFullDocumentUpdate(newContent, "redo");
+                    
+                    updateStatus("Redo operation");
+                } else {
+                    updateStatus("Nothing to redo - or redo failed");
+                    
+                    // Force a document sync to ensure consistency
+                    String currentContent = document.getText();
+                    networkClient.sendDocumentUpdate(currentContent);
                 }
+            } catch (Exception e) {
+                System.err.println("Error performing redo: " + e.getMessage());
+                e.printStackTrace();
+                updateStatus("Error during redo: " + e.getMessage());
                 
-                // Also send a backup full document update with high priority
-                if (networkClient != null && networkClient.getWebSocketClient() != null) {
-                    try {
-                        // Create a specialized message with HIGH_PRIORITY
-                        JsonObject message = new JsonObject();
-                        message.addProperty("type", "instant_document_update");
-                        message.addProperty("userId", userId);
-                        message.addProperty("username", username);
-                        message.addProperty("content", newContent);
-                        message.addProperty("operation", "redo");
-                        message.addProperty("highPriority", true);
-                        message.addProperty("timestamp", System.currentTimeMillis());
-                        
-                        networkClient.getWebSocketClient().send(new Gson().toJson(message));
-                    } catch (Exception e) {
-                        System.err.println("Error sending redo sync: " + e.getMessage());
-                    }
+                // Try to recover from the error by forcing a document update
+                try {
+                    String currentContent = document.getText();
+                    networkClient.sendDocumentUpdate(currentContent);
+                } catch (Exception ex) {
+                    System.err.println("Could not recover from redo error: " + ex.getMessage());
                 }
+            }
+        }
+    }
+    
+    /**
+     * Helper method to send a full document update after undo/redo operations
+     * 
+     * @param content The current document content
+     * @param operationType The type of operation (undo or redo)
+     */
+    private void sendUndoRedoFullDocumentUpdate(String content, String operationType) {
+        if (networkClient != null && networkClient.getWebSocketClient() != null) {
+            try {
+                // Create a specialized message with HIGH_PRIORITY
+                JsonObject message = new JsonObject();
+                message.addProperty("type", "instant_document_update");
+                message.addProperty("userId", userId);
+                message.addProperty("username", username);
+                message.addProperty("content", content);
+                message.addProperty("operation", operationType);
+                message.addProperty("highPriority", true);
+                message.addProperty("timestamp", System.currentTimeMillis());
                 
-                updateStatus("Redo operation");
-            } else {
-                updateStatus("Nothing to redo");
+                networkClient.getWebSocketClient().send(new Gson().toJson(message));
+                System.out.println("Sent " + operationType + " full document update with " + content.length() + " chars");
+            } catch (Exception e) {
+                System.err.println("Error sending " + operationType + " sync: " + e.getMessage());
             }
         }
     }
@@ -997,6 +1129,9 @@ public class EditorController {
                 // Join the session
                 networkClient.joinSession(code, isEditor);
                 
+                // Create a new document for this session if one doesn't exist already
+                createDocumentForSession(code, isEditorRole);
+                
                 if (isEditor) {
                     updateStatus("Joined session as editor - waiting for content sync...");
                 } else {
@@ -1029,6 +1164,84 @@ public class EditorController {
                 e.printStackTrace();
             }
         });
+    }
+    
+    /**
+     * Creates a new document for the current user when joining a session.
+     * 
+     * @param sessionCode The session code being joined
+     * @param isEditorRole Whether the user is joining as an editor or viewer
+     */
+    private void createDocumentForSession(String sessionCode, boolean isEditorRole) {
+        try {
+            if (userId == null) {
+                System.err.println("Cannot create document: User ID is null");
+                return;
+            }
+            
+            // Create a title for the document based on the session code
+            String title = "Session " + sessionCode.substring(0, Math.min(8, sessionCode.length()));
+            
+            // Check if we already have a document with this session code
+            boolean documentExists = false;
+            List<org.bson.Document> userDocs = DatabaseService.getInstance().getDocumentsByOwner(userId);
+            
+            for (org.bson.Document doc : userDocs) {
+                String editorCode = doc.getString("editorCode");
+                String viewerCode = doc.getString("viewerCode");
+                
+                // If this document already has the session code we're joining, use it
+                if ((editorCode != null && editorCode.equals(sessionCode)) || 
+                    (viewerCode != null && viewerCode.equals(sessionCode))) {
+                    documentId = doc.get("_id").toString();
+                    documentTitle = doc.getString("title");
+                    documentExists = true;
+                    
+                    // Update the window title
+                    Platform.runLater(() -> {
+                        Stage stage = (Stage) editorArea.getScene().getWindow();
+                        stage.setTitle("Collaborative Text Editor - " + documentTitle + " (" + username + ")");
+                    });
+                    
+                    System.out.println("Using existing document for session: " + documentId);
+                    break;
+                }
+            }
+            
+            // If no document exists for this session, create a new one
+            if (!documentExists) {
+                // Create a new document
+                documentId = DatabaseService.getInstance().createDocument(title, userId);
+                documentTitle = title;
+                
+                // Update the window title
+                Platform.runLater(() -> {
+                    Stage stage = (Stage) editorArea.getScene().getWindow();
+                    stage.setTitle("Collaborative Text Editor - " + documentTitle + " (" + username + ")");
+                });
+                
+                // Save the session code with the document
+                if (isEditorRole) {
+                    // When joining as editor, save the code as editorCode
+                    DatabaseService.getInstance().updateDocumentWithSession(
+                        documentId, "", sessionCode, sessionCode);
+                    // Update the UI fields
+                    Platform.runLater(() -> {
+                        editorCodeField.setText(sessionCode);
+                        viewerCodeField.setText(sessionCode);
+                    });
+                } else {
+                    // When joining as viewer, save the code as viewerCode
+                    DatabaseService.getInstance().updateDocumentWithSession(
+                        documentId, "", sessionCode, sessionCode);
+                }
+                
+                System.out.println("Created new document for session: " + documentId);
+            }
+        } catch (Exception e) {
+            System.err.println("Error creating document for session: " + e.getMessage());
+            e.printStackTrace();
+        }
     }
     
     @FXML
@@ -1401,6 +1614,94 @@ public class EditorController {
         if (marker != null) {
             marker.setVisible(false);
             editorContainer.getChildren().remove(marker);
+        }
+    }
+    
+    /**
+     * Cleans the document by removing any problematic characters and resetting the internal state.
+     * This is useful for recovering from error conditions.
+     */
+    @FXML
+    private void handleFixDocument(ActionEvent event) {
+        try {
+            // First process any pending operations
+            processBatchInserts();
+            
+            // Get current text
+            String currentText = editorArea.getText();
+            
+            // Clean the document text - remove any control or problematic characters
+            StringBuilder cleanContent = new StringBuilder(currentText.length());
+            for (int i = 0; i < currentText.length(); i++) {
+                char c = currentText.charAt(i);
+                // Only keep visible characters and standard whitespace
+                if (c >= 32 || c == '\t' || c == '\n' || c == '\r') {
+                    cleanContent.append(c);
+                } else {
+                    System.out.println("Removed problematic character at position " + i + 
+                                      ": code=" + (int)c);
+                }
+            }
+            
+            String cleanedText = cleanContent.toString();
+            
+            // Reset the document
+            synchronized (document) {
+                document = new CRDTDocument(userId);
+                
+                // Insert all characters into the fresh document
+                for (int i = 0; i < cleanedText.length(); i++) {
+                    document.localInsert(i, cleanedText.charAt(i));
+                }
+                
+                // Update the UI
+                updateEditorText(cleanedText);
+                
+                // Reset cursor markers
+                Platform.runLater(() -> {
+                    for (CursorMarker marker : new ArrayList<>(cursorMarkers.values())) {
+                        cleanupCursorMarker(marker);
+                    }
+                    cursorMarkers.clear();
+                    
+                    // Update cursor markers for current users
+                    if (userMap != null && !userMap.isEmpty()) {
+                        updateCursorMarkers(new ArrayList<>(userMap.keySet()));
+                    }
+                });
+                
+                // Send the updated document to the server
+                networkClient.sendDocumentUpdate(cleanedText);
+                
+                updateStatus("Document fixed and cleaned");
+            }
+        } catch (Exception e) {
+            System.err.println("Error fixing document: " + e.getMessage());
+            e.printStackTrace();
+            updateStatus("Error fixing document: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Tests the MongoDB connection and updates the status label with the result.
+     * This helps diagnose if data is going to MongoDB or just being stored in-memory.
+     */
+    @FXML
+    private void handleTestDatabaseConnection(ActionEvent event) {
+        try {
+            updateStatus("Testing MongoDB connection...");
+            
+            // Test the connection using the DatabaseService
+            boolean connected = DatabaseService.getInstance().testMongoDBConnection();
+            
+            if (connected) {
+                updateStatus("MongoDB connection successful! Your data is being saved to the cloud.");
+            } else {
+                updateStatus("WARNING: Using in-memory storage. Your data is NOT being saved to MongoDB!");
+            }
+        } catch (Exception e) {
+            updateStatus("Error testing MongoDB connection: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 } 

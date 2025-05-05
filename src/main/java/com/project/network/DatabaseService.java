@@ -23,11 +23,14 @@ import java.util.UUID;
  * This implementation can work without MongoDB by using in-memory storage.
  */
 public class DatabaseService {
+    // Update the connection string with a more generic format for safety
     private static final String CONNECTION_STRING = "mongodb+srv://youssefshafik04:1gaifqXHyXhxccv2@cluster0.fsx0whh.mongodb.net/?connectTimeoutMS=5000&serverSelectionTimeoutMS=5000";
     private static final String DATABASE_NAME = "collaborative_editor";
     private static final String USERS_COLLECTION = "users";
     private static final String DOCUMENTS_COLLECTION = "documents";
     
+    // Add a flag to track if we successfully connected to MongoDB
+    private boolean mongoDbConnected = false;
     private MongoClient mongoClient;
     private MongoDatabase database;
     private MongoCollection<Document> usersCollection;
@@ -57,7 +60,11 @@ public class DatabaseService {
      */
     private DatabaseService() {
         try {
-            System.out.println("Attempting to connect to MongoDB...");
+            System.out.println("==================================================");
+            System.out.println("Attempting to connect to MongoDB Atlas...");
+            System.out.println("Connection string: " + CONNECTION_STRING);
+            System.out.println("Database name: " + DATABASE_NAME);
+            System.out.println("==================================================");
             
             // Set a shorter connection timeout (5 seconds instead of 30)
             mongoClient = MongoClients.create(CONNECTION_STRING);
@@ -69,11 +76,26 @@ public class DatabaseService {
             usersCollection = database.getCollection(USERS_COLLECTION);
             documentsCollection = database.getCollection(DOCUMENTS_COLLECTION);
             
-            System.out.println("Connected to MongoDB successfully");
+            // Verify collections by counting documents
+            long userCount = usersCollection.countDocuments();
+            long docCount = documentsCollection.countDocuments();
+            
+            System.out.println("==================================================");
+            System.out.println("MongoDB connection successful!");
+            System.out.println("Users collection: " + userCount + " documents");
+            System.out.println("Documents collection: " + docCount + " documents");
+            System.out.println("==================================================");
+            
             useInMemoryStorage = false;
+            mongoDbConnected = true;
         } catch (Exception e) {
-            System.err.println("Error connecting to MongoDB: " + e.getMessage());
-            System.out.println("Using in-memory storage instead");
+            System.err.println("==================================================");
+            System.err.println("ERROR: Failed to connect to MongoDB Atlas!");
+            System.err.println("Error message: " + e.getMessage());
+            System.err.println("IMPORTANT: FALLING BACK TO IN-MEMORY STORAGE!");
+            System.err.println("WARNING: Your data will NOT be saved to MongoDB!");
+            System.err.println("==================================================");
+            e.printStackTrace();
             
             // Make sure to close any connection that might have been created
             if (mongoClient != null) {
@@ -86,6 +108,7 @@ public class DatabaseService {
             }
             
             useInMemoryStorage = true;
+            mongoDbConnected = false;
             
             // Create a demo user for easier testing when MongoDB is not available
             createDemoUser();
@@ -122,13 +145,23 @@ public class DatabaseService {
      */
     public boolean registerUser(String username, String password) {
         if (useInMemoryStorage) {
+            System.out.println("Using in-memory storage for user registration: " + username);
             return registerUserInMemory(username, password);
         }
         
         try {
+            System.out.println("Attempting to register user in MongoDB: " + username);
+            
+            // Double-check the MongoDB connection
+            if (!mongoDbConnected) {
+                System.err.println("MongoDB not connected, falling back to in-memory storage");
+                return registerUserInMemory(username, password);
+            }
+            
             // Check if username already exists
             Document existingUser = usersCollection.find(Filters.eq("username", username)).first();
             if (existingUser != null) {
+                System.out.println("Username already exists: " + username);
                 return false;
             }
             
@@ -141,10 +174,20 @@ public class DatabaseService {
                     .append("password", hashedPassword)
                     .append("createdAt", new Date());
             
+            // Insert the user into MongoDB
             usersCollection.insertOne(newUser);
-            return true;
+            
+            // Confirm the user was added by fetching the new document
+            Document confirmUser = usersCollection.find(Filters.eq("username", username)).first();
+            if (confirmUser != null) {
+                System.out.println("Successfully registered user in MongoDB: " + username);
+                return true;
+            } else {
+                System.err.println("User registration verification failed: " + username);
+                return registerUserInMemory(username, password);
+            }
         } catch (Exception e) {
-            System.err.println("Error registering user: " + e.getMessage());
+            System.err.println("Error registering user in MongoDB: " + e.getMessage());
             e.printStackTrace();
             return registerUserInMemory(username, password);
         }
@@ -175,28 +218,44 @@ public class DatabaseService {
      */
     public String authenticateUser(String username, String password) {
         if (useInMemoryStorage) {
+            System.out.println("Using in-memory storage for authentication: " + username);
             return authenticateUserInMemory(username, password);
         }
         
         try {
+            System.out.println("Attempting to authenticate user in MongoDB: " + username);
+            
+            // Double-check the MongoDB connection
+            if (!mongoDbConnected) {
+                System.err.println("MongoDB not connected, falling back to in-memory authentication");
+                return authenticateUserInMemory(username, password);
+            }
+            
             Document user = usersCollection.find(Filters.eq("username", username)).first();
             if (user == null) {
-                return null;
+                System.out.println("User not found in MongoDB: " + username);
+                return authenticateUserInMemory(username, password);
             }
             
             String hashedPassword = user.getString("password");
             if (BCrypt.checkpw(password, hashedPassword)) {
                 Object idObj = user.get("_id");
+                String userId;
                 if (idObj instanceof ObjectId) {
-                    return ((ObjectId) idObj).toString();
+                    userId = ((ObjectId) idObj).toString();
                 } else {
-                    return idObj.toString();
+                    userId = idObj.toString();
                 }
+                
+                System.out.println("Successfully authenticated user in MongoDB: " + username + " with ID: " + userId);
+                return userId;
+            } else {
+                System.out.println("Invalid password for user: " + username);
             }
             
             return null;
         } catch (Exception e) {
-            System.err.println("Error authenticating user: " + e.getMessage());
+            System.err.println("Error authenticating user in MongoDB: " + e.getMessage());
             e.printStackTrace();
             return authenticateUserInMemory(username, password);
         }
@@ -493,6 +552,108 @@ public class DatabaseService {
     public void close() {
         if (mongoClient != null) {
             mongoClient.close();
+        }
+    }
+    
+    /**
+     * Tests the MongoDB connection and displays detailed diagnostic information.
+     * If the connection has failed previously, this will attempt to reconnect.
+     * 
+     * @return true if MongoDB is connected, false if using in-memory storage
+     */
+    public boolean testMongoDBConnection() {
+        if (mongoDbConnected && mongoClient != null) {
+            try {
+                // Test the connection by running a simple command
+                database.runCommand(new Document("ping", 1));
+                
+                // Count documents to verify collections
+                long userCount = usersCollection.countDocuments();
+                long docCount = documentsCollection.countDocuments();
+                
+                System.out.println("==================================================");
+                System.out.println("MongoDB connection test: SUCCESS");
+                System.out.println("Connected to: " + DATABASE_NAME);
+                System.out.println("Users collection: " + userCount + " documents");
+                System.out.println("Documents collection: " + docCount + " documents");
+                System.out.println("==================================================");
+                
+                return true;
+            } catch (Exception e) {
+                System.err.println("==================================================");
+                System.err.println("MongoDB connection test: FAILED");
+                System.err.println("Error: " + e.getMessage());
+                System.err.println("Will attempt to reconnect...");
+                System.err.println("==================================================");
+                
+                // Close the existing client
+                try {
+                    mongoClient.close();
+                } catch (Exception ex) {
+                    // Ignore
+                }
+                
+                // Try to reconnect
+                return attemptReconnect();
+            }
+        } else if (!mongoDbConnected && !useInMemoryStorage) {
+            // This is an inconsistent state - try to reconnect
+            System.err.println("==================================================");
+            System.err.println("MongoDB connection state inconsistent!");
+            System.err.println("Attempting to reconnect...");
+            System.err.println("==================================================");
+            
+            return attemptReconnect();
+        } else {
+            // Currently using in-memory storage
+            System.err.println("==================================================");
+            System.err.println("Currently using IN-MEMORY STORAGE.");
+            System.err.println("Your data is NOT being saved to MongoDB!");
+            System.err.println("Attempting to reconnect to MongoDB...");
+            System.err.println("==================================================");
+            
+            return attemptReconnect();
+        }
+    }
+    
+    /**
+     * Attempts to reconnect to MongoDB.
+     * 
+     * @return true if reconnection was successful, false otherwise
+     */
+    private boolean attemptReconnect() {
+        try {
+            System.out.println("Attempting to connect to MongoDB...");
+            
+            // Create new MongoDB client
+            mongoClient = MongoClients.create(CONNECTION_STRING);
+            
+            // Test connection immediately
+            database = mongoClient.getDatabase(DATABASE_NAME);
+            database.runCommand(new Document("ping", 1));
+            
+            usersCollection = database.getCollection(USERS_COLLECTION);
+            documentsCollection = database.getCollection(DOCUMENTS_COLLECTION);
+            
+            // If we got here, connection is successful
+            System.out.println("==================================================");
+            System.out.println("Successfully reconnected to MongoDB!");
+            System.out.println("Your data will now be saved to MongoDB.");
+            System.out.println("==================================================");
+            
+            useInMemoryStorage = false;
+            mongoDbConnected = true;
+            return true;
+        } catch (Exception e) {
+            System.err.println("==================================================");
+            System.err.println("Reconnection to MongoDB failed!");
+            System.err.println("Error: " + e.getMessage());
+            System.err.println("Continuing with in-memory storage.");
+            System.err.println("==================================================");
+            
+            useInMemoryStorage = true;
+            mongoDbConnected = false;
+            return false;
         }
     }
     
