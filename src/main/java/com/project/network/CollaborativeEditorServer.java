@@ -46,11 +46,28 @@ public class CollaborativeEditorServer extends WebSocketServer {
     private final Map<String, String> usernames = new ConcurrentHashMap<>();
     
     public CollaborativeEditorServer() {
-        super(new InetSocketAddress(DEFAULT_PORT));
+        super(new InetSocketAddress(getPortFromEnv()));
     }
     
     public CollaborativeEditorServer(int port) {
         super(new InetSocketAddress(port));
+    }
+    
+    /**
+     * Get the port from environment variables or use default
+     */
+    private static int getPortFromEnv() {
+        try {
+            String portEnv = System.getenv("PORT");
+            if (portEnv != null && !portEnv.isEmpty()) {
+                int port = Integer.parseInt(portEnv);
+                System.out.println("Using PORT from environment: " + port);
+                return port;
+            }
+        } catch (NumberFormatException e) {
+            System.err.println("Invalid PORT environment variable. Using default: " + DEFAULT_PORT);
+        }
+        return DEFAULT_PORT;
     }
     
     @Override
@@ -1487,19 +1504,57 @@ public class CollaborativeEditorServer extends WebSocketServer {
     }
     
     public static void main(String[] args) {
-        int port = DEFAULT_PORT;
+        int port = getPortFromEnv();
         
-        // Check if a custom port was specified
-        if (args.length > 0) {
-            try {
-                port = Integer.parseInt(args[0]);
-            } catch (NumberFormatException e) {
-                System.err.println("Invalid port number. Using default port " + DEFAULT_PORT);
-            }
+        System.out.println("==================================================");
+        System.out.println("COLLABORATIVE EDITOR SERVER");
+        System.out.println("==================================================");
+        System.out.println("Starting WebSocket server on port: " + port);
+        System.out.println("Environment: " + (System.getenv("RAILWAY_ENVIRONMENT") != null ? "Production (Railway)" : "Development"));
+        
+        // Print all environment variables for debugging
+        System.out.println("==================================================");
+        System.out.println("ENVIRONMENT VARIABLES:");
+        System.out.println("PORT: " + System.getenv("PORT"));
+        System.out.println("MONGODB_URI: " + (System.getenv("MONGODB_URI") != null ? 
+                          System.getenv("MONGODB_URI").replaceAll(":[^/]+@", ":****@") : "null"));
+        System.out.println("MONGODB_DATABASE: " + System.getenv("MONGODB_DATABASE"));
+        System.out.println("==================================================");
+        
+        // Initialize database connection - do this early to show any errors
+        try {
+            DatabaseService.getInstance();
+            System.out.println("Database service initialized");
+        } catch (Exception e) {
+            System.err.println("Warning: Database service initialization error: " + e.getMessage());
+            e.printStackTrace();
         }
         
+        // Create server instance
         CollaborativeEditorServer server = new CollaborativeEditorServer(port);
-        server.start();
-        System.out.println("Collaborative Editor Server started on port " + port);
+        
+        // Add shutdown hook
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            System.out.println("Shutting down server...");
+            try {
+                // Close the database connection
+                DatabaseService.getInstance().close();
+                // Stop the server
+                server.stop();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }));
+        
+        // Start the server
+        try {
+            server.start();
+            System.out.println("Server started successfully! Waiting for connections...");
+            System.out.println("==================================================");
+            System.out.println("WebSocket server started on port " + port);
+        } catch (Exception e) {
+            System.err.println("Failed to start server: " + e.getMessage());
+            e.printStackTrace();
+        }
     }
 } 
