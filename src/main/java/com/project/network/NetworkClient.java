@@ -27,7 +27,8 @@ import javafx.application.Platform;
  * A WebSocket client for handling communication with the server.
  */
 public class NetworkClient {
-    private static final String DEFAULT_SERVER_URI = "ws://localhost:8887";
+    // Use environment variable for server URL or fallback to localhost
+    private static final String DEFAULT_SERVER_URI = getServerUriFromEnv();
     
     private String userId;
     private String username;
@@ -1410,5 +1411,26 @@ public class NetworkClient {
         notifyPresenceListeners(emptyUserMap);
         
         System.out.println("Purged all disconnected users");
+    }
+    
+    /**
+     * Get the server URI from environment variable or use default
+     */
+    private static String getServerUriFromEnv() {
+        String serverUrl = System.getenv("SERVER_URL");
+        if (serverUrl != null && !serverUrl.isEmpty()) {
+            // Log the original URL from environment
+            System.out.println("Original SERVER_URL from environment: " + serverUrl);
+            
+            // Use the URL exactly as provided in the environment variable
+            // Railway handles the protocol and port automatically
+            System.out.println("Using WebSocket URL: " + serverUrl);
+            return serverUrl;
+        }
+        
+        // Default for local development
+        String defaultUrl = "ws://localhost:8887";
+        System.out.println("No SERVER_URL environment variable found, using default: " + defaultUrl);
+        return defaultUrl;
     }
 } 
