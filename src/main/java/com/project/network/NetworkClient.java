@@ -11,8 +11,13 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.Timer;
+import java.util.TimerTask;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -24,8 +29,8 @@ import javafx.application.Platform;
 public class NetworkClient {
     private static final String DEFAULT_SERVER_URI = "ws://localhost:8887";
     
-    private final String userId;
-    private final String username;
+    private String userId;
+    private String username;
     private WebSocketClient webSocketClient;
     private final Gson gson = new Gson();
     
@@ -41,13 +46,21 @@ public class NetworkClient {
     private volatile boolean cursorMoveScheduled = false;
     
     // Cursor position update throttling
-    private static final long CURSOR_MOVE_THROTTLE_MS = 50;
+    private static final long CURSOR_MOVE_THROTTLE_MS = 40; // Reduced from 50ms to 40ms for smoother updates
     private volatile long lastCursorMoveTime = 0;
     
     // Keep track of the last operation times
     private Map<String, Long> lastOperationTimes = new ConcurrentHashMap<>();
     
+    // Track last known cursor positions of all users
+    private Map<String, Integer> lastKnownCursorPositions = new ConcurrentHashMap<>();
+    
     private boolean connected = false;
+    
+    private List<Consumer<Boolean>> connectionListeners = new ArrayList<>();
+    
+    // Track seen document sync message IDs to prevent duplicates
+    private final Set<String> recentlySyncedDocuments = new HashSet<>();
     
     /**
      * Returns the underlying WebSocketClient instance.
@@ -59,12 +72,29 @@ public class NetworkClient {
     
     public NetworkClient(String userId) {
         this.userId = userId;
-        this.username = "User " + userId.substring(0, 4);
+        this.username = userId; // Don't prefix with "User"
+        
+        // Start the sync history cleaner
+        startSyncHistoryCleaner();
     }
     
     public NetworkClient(String userId, String username) {
         this.userId = userId;
-        this.username = username != null ? username : "User " + userId.substring(0, 4);
+        this.username = username;
+        
+        // Start the sync history cleaner
+        startSyncHistoryCleaner();
+        
+        // Send username update immediately after connection
+        addConnectionListener(connected -> {
+            if (connected) {
+                JsonObject usernameMessage = new JsonObject();
+                usernameMessage.addProperty("type", "update_username");
+                usernameMessage.addProperty("userId", userId);
+                usernameMessage.addProperty("username", username);
+                webSocketClient.send(gson.toJson(usernameMessage));
+            }
+        });
     }
     
     /**
@@ -73,19 +103,32 @@ public class NetworkClient {
      */
     public boolean connect() {
         try {
-            URI serverUri = new URI(DEFAULT_SERVER_URI);
-            webSocketClient = new WebSocketClient(serverUri) {
+            // Check if already connected
+            if (webSocketClient != null && webSocketClient.isOpen()) {
+                System.out.println("Already connected to WebSocket server");
+                return true;
+            }
+            
+            System.out.println("Connecting to WebSocket server");
+            
+            // First, clear any disconnected users from UI
+            purgeDisconnectedUsers();
+            
+            // Connect to the server
+            webSocketClient = new WebSocketClient(new URI(DEFAULT_SERVER_URI)) {
                 @Override
                 public void onOpen(ServerHandshake handshakedata) {
-                    connected = true;
                     System.out.println("Connected to WebSocket server");
+                    connected = true;
+                    notifyConnectionListeners(true);
                     
-                    // Register with the server
-                    JsonObject message = new JsonObject();
-                    message.addProperty("type", "register");
-                    message.addProperty("userId", userId);
-                    message.addProperty("username", username);
-                    send(gson.toJson(message));
+                    // First register our userId
+                    sendRegistration();
+                    
+                    // Then send our username immediately after registration
+                    if (username != null && !username.isEmpty()) {
+                        sendPresenceUpdate();
+                    }
                 }
                 
                 @Override
@@ -97,6 +140,25 @@ public class NetworkClient {
                 public void onClose(int code, String reason, boolean remote) {
                     connected = false;
                     System.out.println("Connection closed: " + reason);
+                    
+                    // Clear presence data since we're no longer connected
+                    lastKnownCursorPositions.clear();
+                    
+                    // Notify connection listeners
+                    notifyConnectionListeners(false);
+                    
+                    // Try to automatically reconnect after a delay if this was a remote closure
+                    if (remote) {
+                        new Thread(() -> {
+                            try {
+                                System.out.println("Attempting to reconnect in 3 seconds...");
+                                Thread.sleep(3000);
+                                connect();
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                        }).start();
+                    }
                 }
                 
                 @Override
@@ -104,14 +166,64 @@ public class NetworkClient {
                     notifyErrorListeners("WebSocket error: " + ex.getMessage());
                     System.err.println("WebSocket error: " + ex.getMessage());
                     ex.printStackTrace();
+                    
+                    // Attempt to reconnect after error
+                    if (connected) {
+                        connected = false;
+                        notifyConnectionListeners(false);
+                    }
                 }
             };
             
-            return webSocketClient.connectBlocking();
-        } catch (URISyntaxException | InterruptedException e) {
-            notifyErrorListeners("Failed to connect: " + e.getMessage());
-            System.err.println("Failed to connect: " + e.getMessage());
+            // Set connection timeout
+            webSocketClient.setConnectionLostTimeout(30);
+            
+            // Connect with timeout
+            boolean success = false;
+            try {
+                success = webSocketClient.connectBlocking(5, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                System.err.println("Connection interrupted: " + e.getMessage());
+                Thread.currentThread().interrupt();
+            }
+            
+            if (!success) {
+                System.err.println("Failed to connect to WebSocket server");
+                notifyErrorListeners("Failed to connect to collaboration server");
+                return false;
+            }
+            
+            return true;
+        } catch (URISyntaxException e) {
+            notifyErrorListeners("Invalid server URI: " + e.getMessage());
+            System.err.println("Invalid server URI: " + e.getMessage());
             return false;
+        } catch (Exception e) {
+            notifyErrorListeners("Connection error: " + e.getMessage());
+            System.err.println("Connection error: " + e.getMessage());
+            e.printStackTrace();
+            return false;
+        }
+    }
+    
+    /**
+     * Sends user registration to the server.
+     */
+    private void sendRegistration() {
+        if (webSocketClient != null && webSocketClient.isOpen()) {
+            try {
+                JsonObject message = new JsonObject();
+                message.addProperty("type", "register");
+                message.addProperty("userId", userId);
+                if (username != null && !username.isEmpty()) {
+                    message.addProperty("username", username);
+                }
+                
+                webSocketClient.send(gson.toJson(message));
+                System.out.println("Registering with server as user: " + (username != null ? username : userId));
+            } catch (Exception e) {
+                System.err.println("Error sending registration: " + e.getMessage());
+            }
         }
     }
     
@@ -175,6 +287,9 @@ public class NetworkClient {
         message.addProperty("userId", userId);
         message.add("position", gson.toJsonTree(position));
         
+        // Log for debugging
+        System.out.println("Sending DELETE operation for position: " + position);
+        
         webSocketClient.send(gson.toJson(message));
     }
     
@@ -185,8 +300,7 @@ public class NetworkClient {
      */
     public void sendCursorMove(int position) {
         if (!connected) {
-            notifyErrorListeners("Not connected to server");
-            return;
+            return; // Silently fail instead of showing error - cursor movements are non-critical
         }
         
         // Don't send if the position hasn't changed
@@ -201,9 +315,11 @@ public class NetworkClient {
             lastOperationTimes.getOrDefault("delete", 0L)
         );
         
-        // If we recently did an edit, don't send cursor updates
+        // If we recently did an edit, send cursor updates less frequently
         if (now - lastEditTime < 100) {
-            return;
+            if (now - lastCursorMoveTime < CURSOR_MOVE_THROTTLE_MS * 2) { // Double the throttle time during edits
+                return;
+            }
         }
         
         // Throttle updates
@@ -222,7 +338,7 @@ public class NetworkClient {
             new Thread(() -> {
                 try {
                     Thread.sleep(CURSOR_MOVE_THROTTLE_MS);
-                    sendCursorMoveNow(lastSentCursorPosition);
+                    sendCursorMoveNow(lastSentCursorPosition); // Use the latest position
                     cursorMoveScheduled = false;
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -253,7 +369,12 @@ public class NetworkClient {
         message.addProperty("userId", userId);
         message.addProperty("position", position);
         
-        webSocketClient.send(gson.toJson(message));
+        try {
+            webSocketClient.send(gson.toJson(message));
+        } catch (Exception e) {
+            System.err.println("Error sending cursor move: " + e.getMessage());
+            // Don't show error to user - cursor movements are non-critical
+        }
     }
     
     /**
@@ -283,18 +404,28 @@ public class NetworkClient {
             return;
         }
         
+        // First, ensure our own ID is registered by re-registering
+        JsonObject registerMsg = new JsonObject();
+        registerMsg.addProperty("type", "register");
+        registerMsg.addProperty("userId", userId);
+        if (username != null && !username.isEmpty()) {
+            registerMsg.addProperty("username", username);
+        }
+        webSocketClient.send(gson.toJson(registerMsg));
+        
         System.out.println("==================================================");
         System.out.println("Sending join session request to server");
         System.out.println("Session code: " + code);
         System.out.println("Joining as: " + (isEditor ? "EDITOR" : "VIEWER"));
         System.out.println("User ID: " + userId);
+        System.out.println("Username: " + username);
         System.out.println("WebSocket connected: " + (webSocketClient != null && webSocketClient.isOpen()));
         System.out.println("==================================================");
         
         JsonObject message = new JsonObject();
         message.addProperty("type", "join_session");
         message.addProperty("userId", userId);
-        message.addProperty("code", code);
+        message.addProperty("code", code); // Use code for backward compatibility
         message.addProperty("asEditor", isEditor);
         
         webSocketClient.send(gson.toJson(message));
@@ -312,6 +443,8 @@ public class NetworkClient {
             switch (type) {
                 case "register_ack":
                     System.out.println("Registered with server as " + jsonMessage.get("userId").getAsString());
+                    // Notify connection listeners
+                    notifyConnectionListeners(true);
                     break;
                     
                 case "session_created":
@@ -323,6 +456,62 @@ public class NetworkClient {
                     System.out.println("Viewer code: " + viewerCode);
                     System.out.println("==================================================");
                     notifyCodeListeners(new CodePair(editorCode, viewerCode));
+                    break;
+                    
+                case "create_session_ack":
+                    String sessionId = jsonMessage.get("sessionId").getAsString();
+                    System.out.println("==================================================");
+                    System.out.println("Session created successfully with new format");
+                    System.out.println("Session ID: " + sessionId);
+                    System.out.println("==================================================");
+                    notifyCodeListeners(new CodePair(sessionId, sessionId));
+                    break;
+                    
+                case "join_session_ack":
+                    System.out.println("==================================================");
+                    System.out.println("SESSION JOINED SUCCESSFULLY");
+                    
+                    // Check if document content is included
+                    if (jsonMessage.has("documentContent")) {
+                        String documentContent = jsonMessage.get("documentContent").getAsString();
+                        System.out.println("Document content received: " + documentContent.length() + " characters");
+                        
+                        // Create a special operation for document sync
+                        Operation syncOperation = new Operation(
+                            Operation.Type.DOCUMENT_SYNC, 
+                            null, 
+                            null, 
+                            userId, 
+                            -1,
+                            documentContent
+                        );
+                        
+                        // Notify immediately
+                        notifyOperationListeners(syncOperation);
+                    } else {
+                        System.out.println("No document content in join response");
+                    }
+                    
+                    // Get any usernames provided
+                    if (jsonMessage.has("usernames")) {
+                        try {
+                            JsonObject usernamesObj = jsonMessage.getAsJsonObject("usernames");
+                            Map<String, String> userMapFromServer = new HashMap<>();
+                            
+                            for (Map.Entry<String, com.google.gson.JsonElement> entry : usernamesObj.entrySet()) {
+                                userMapFromServer.put(entry.getKey(), entry.getValue().getAsString());
+                            }
+                            
+                            if (!userMapFromServer.isEmpty()) {
+                                notifyPresenceListeners(userMapFromServer);
+                                System.out.println("Received usernames for " + userMapFromServer.size() + " users");
+                            }
+                        } catch (Exception e) {
+                            System.err.println("Error processing usernames: " + e.getMessage());
+                        }
+                    }
+                    
+                    System.out.println("==================================================");
                     break;
                     
                 case "session_joined":
@@ -354,6 +543,14 @@ public class NetworkClient {
                 case "presence":
                     // Handle legacy server that sends only a list of user IDs
                     if (jsonMessage.has("users")) {
+                        // Check if this is a high priority update
+                        boolean highPriority = jsonMessage.has("highPriority") && 
+                                               jsonMessage.get("highPriority").getAsBoolean();
+                        
+                        if (highPriority) {
+                            System.out.println("Received HIGH PRIORITY presence update");
+                        }
+                        
                         if (jsonMessage.get("users").isJsonArray()) {
                             // Old format: just a list of user IDs
                             List<String> userIds = gson.fromJson(jsonMessage.get("users"), List.class);
@@ -361,16 +558,41 @@ public class NetworkClient {
                             // Convert to a map for our new interface
                             Map<String, String> userMap = new HashMap<>();
                             for (String id : userIds) {
-                                // Use the username if we know it, otherwise use a generic name
-                                userMap.put(id, username != null && id.equals(userId) ? 
-                                              username : "User " + id.substring(0, Math.min(4, id.length())));
+                                // Use the actual username for current user, don't add "User" prefix for others
+                                if (id.equals(userId) && username != null) {
+                                    userMap.put(id, username);
+                                } else {
+                                    // For other users, use their username if server provides it
+                                    // or use the ID without "User" prefix
+                                    userMap.put(id, id);
+                                }
                             }
                             
-                            notifyPresenceListeners(userMap);
+                            if (highPriority) {
+                                // For high priority updates, we force an update regardless of content
+                                notifyPresenceListeners(userMap);
+                            } else {
+                                // For normal updates, we check if there's something new
+                                notifyPresenceListeners(userMap);
+                            }
                         } else {
                             // New format: a map of user IDs to usernames
                             Map<String, String> userMap = gson.fromJson(jsonMessage.get("users"), Map.class);
-                            notifyPresenceListeners(userMap);
+                            
+                            // Log the received user map
+                            StringBuilder userMapStr = new StringBuilder();
+                            for (Map.Entry<String, String> entry : userMap.entrySet()) {
+                                userMapStr.append(entry.getKey()).append("->").append(entry.getValue()).append(", ");
+                            }
+                            System.out.println("Received user map: " + userMapStr.toString());
+                            
+                            // Always notify for high priority updates
+                            if (highPriority) {
+                                System.out.println("Forcing presence update due to high priority");
+                                notifyPresenceListeners(userMap);
+                            } else {
+                                notifyPresenceListeners(userMap);
+                            }
                         }
                     }
                     break;
@@ -387,6 +609,27 @@ public class NetworkClient {
                         
                         // Notify listeners about this username
                         notifyPresenceListeners(updateMap);
+                    }
+                    break;
+                    
+                case "username_updates":
+                    // New message type - handles bulk username updates
+                    if (jsonMessage.has("usernames")) {
+                        try {
+                            JsonObject usernamesObj = jsonMessage.getAsJsonObject("usernames");
+                            Map<String, String> userMapFromServer = new HashMap<>();
+                            
+                            for (Map.Entry<String, com.google.gson.JsonElement> entry : usernamesObj.entrySet()) {
+                                userMapFromServer.put(entry.getKey(), entry.getValue().getAsString());
+                            }
+                            
+                            if (!userMapFromServer.isEmpty()) {
+                                notifyPresenceListeners(userMapFromServer);
+                                System.out.println("Received bulk username updates for " + userMapFromServer.size() + " users");
+                            }
+                        } catch (Exception e) {
+                            System.err.println("Error processing username updates: " + e.getMessage());
+                        }
                     }
                     break;
                     
@@ -422,6 +665,59 @@ public class NetworkClient {
                     
                 case "error":
                     notifyErrorListeners(jsonMessage.get("message").getAsString());
+                    break;
+                    
+                case "usernames":
+                    // Handle list of all usernames in the session
+                    Map<String, String> userMap = new HashMap<>();
+                    JsonObject usernamesObj = jsonMessage.getAsJsonObject("usernames");
+                    
+                    if (usernamesObj != null) {
+                        for (Map.Entry<String, com.google.gson.JsonElement> entry : usernamesObj.entrySet()) {
+                            String id = entry.getKey();
+                            String name = entry.getValue().getAsString();
+                            userMap.put(id, name);
+                        }
+                        
+                        System.out.println("Received usernames for " + userMap.size() + " users");
+                        
+                        // Notify listeners of presence update
+                        notifyPresenceListeners(userMap);
+                    }
+                    break;
+                    
+                case "user_joined":
+                    // Handle notification that a specific user has joined
+                    if (jsonMessage.has("userId") && jsonMessage.has("username")) {
+                        String joinedUserId = jsonMessage.get("userId").getAsString();
+                        String joinedUsername = jsonMessage.get("username").getAsString();
+                        
+                        System.out.println("⭐ IMPORTANT: Received notification that user joined: " + 
+                                         joinedUsername + " (" + joinedUserId + ")");
+                        
+                        // Create a user map for this update
+                        Map<String, String> joinUpdateMap = new HashMap<>();
+                        
+                        // Always add ourselves to this map
+                        if (username != null && !username.isEmpty()) {
+                            joinUpdateMap.put(userId, username);
+                        }
+                        
+                        // Add the new user that joined
+                        joinUpdateMap.put(joinedUserId, joinedUsername);
+                        
+                        // Force an immediate presence update with special flag to avoid filtering
+                        notifyPresenceListeners(joinUpdateMap);
+                        
+                        // Request a full user list to ensure we're in sync
+                        JsonObject presenceRequest = new JsonObject();
+                        presenceRequest.addProperty("type", "request_presence");
+                        presenceRequest.addProperty("userId", userId);
+                        webSocketClient.send(gson.toJson(presenceRequest));
+                        
+                        // Also add this user to our last known cursor positions
+                        lastKnownCursorPositions.put(joinedUserId, -1);
+                    }
                     break;
                     
                 default:
@@ -474,6 +770,9 @@ public class NetworkClient {
             String sourceUserId = message.get("userId").getAsString();
             int position = message.get("position").getAsInt();
             
+            // Store the cursor position for later reference
+            lastKnownCursorPositions.put(sourceUserId, position);
+            
             // Create and notify with the operation
             Operation operation = new Operation(Operation.Type.CURSOR_MOVE, null, null, sourceUserId, position);
             notifyOperationListeners(operation);
@@ -500,9 +799,73 @@ public class NetworkClient {
         try {
             String content = message.get("content").getAsString();
             
+            // Create a unique identifier for this sync message
+            String syncId = "";
+            if (message.has("timestamp")) {
+                syncId = message.get("timestamp").getAsString();
+            } else {
+                syncId = content.hashCode() + "-" + System.currentTimeMillis();
+            }
+            
+            // Check if we've already processed this exact sync recently
+            synchronized (recentlySyncedDocuments) {
+                if (recentlySyncedDocuments.contains(syncId)) {
+                    System.out.println("Ignoring duplicate document sync: " + syncId);
+                    return;
+                }
+                
+                // Remember this sync to avoid duplicates
+                recentlySyncedDocuments.add(syncId);
+                
+                // Limit the size of history to prevent memory leaks
+                if (recentlySyncedDocuments.size() > 100) {
+                    // Remove oldest entries when we exceed 100
+                    Iterator<String> iterator = recentlySyncedDocuments.iterator();
+                    for (int i = 0; i < 50 && iterator.hasNext(); i++) {
+                        iterator.next();
+                        iterator.remove();
+                    }
+                }
+            }
+            
+            System.out.println("Received document sync with " + content.length() + " characters");
+            
+            // Check if there's a sender ID and it's our own message echoed back
+            if (message.has("senderId") && message.get("senderId").getAsString().equals(userId)) {
+                System.out.println("Ignoring document sync from our own user ID");
+                return;
+            }
+            
+            // Always log document sync for debugging
+            boolean highPriority = message.has("highPriority") && message.get("highPriority").getAsBoolean();
+            if (highPriority) {
+                System.out.println("HIGH PRIORITY document sync received");
+            }
+            
             // Create a special operation for document sync
-            Operation operation = new Operation(Operation.Type.DOCUMENT_SYNC, null, null, userId, -1, content);
+            Operation operation = new Operation(
+                Operation.Type.DOCUMENT_SYNC, 
+                null, 
+                null, 
+                message.has("senderId") ? message.get("senderId").getAsString() : userId, 
+                -1, 
+                content
+            );
+            
+            // Queue the operation for immediate processing
             notifyOperationListeners(operation);
+            
+            // Send confirmation back to server (but not for our own updates)
+            if (!message.has("senderId") || !message.get("senderId").getAsString().equals(userId)) {
+                JsonObject confirmMsg = new JsonObject();
+                confirmMsg.addProperty("type", "sync_confirmation");
+                confirmMsg.addProperty("receivedLength", content.length());
+                confirmMsg.addProperty("userId", userId);
+                confirmMsg.addProperty("timestamp", System.currentTimeMillis());
+                
+                webSocketClient.send(gson.toJson(confirmMsg));
+                System.out.println("Sent sync confirmation for " + content.length() + " characters");
+            }
         } catch (Exception e) {
             System.err.println("Error processing document sync operation: " + e.getMessage());
             e.printStackTrace();
@@ -642,10 +1005,44 @@ public class NetworkClient {
     }
     
     /**
-     * Notifies presence listeners of a change.
-     * @param userMap a map of userIds to usernames
+     * Notifies all presence listeners about user presence changes.
+     * This version has been improved to handle both regular and high-priority updates.
+     *
+     * @param userMap User map from server update
      */
     private void notifyPresenceListeners(Map<String, String> userMap) {
+        if (userMap == null) {
+            return;
+        }
+        
+        if (userMap.isEmpty() && !userMap.containsKey(userId)) {
+            // Make sure we're always in our own map at minimum
+            if (username != null && !username.isEmpty()) {
+                userMap = new HashMap<>(userMap);
+                userMap.put(userId, username);
+            }
+        }
+        
+        // Before notifying listeners, log what we're doing
+        boolean hasOtherUsers = false;
+        for (Map.Entry<String, String> entry : userMap.entrySet()) {
+            if (!entry.getKey().equals(userId)) {
+                hasOtherUsers = true;
+                break;
+            }
+        }
+        System.out.println("Notifying presence listeners with " + userMap.size() + 
+                          " users" + (hasOtherUsers ? " including remote users" : " (only self)"));
+        
+        // Add all these users to our tracked cursor positions map
+        for (String remoteUserId : userMap.keySet()) {
+            if (!remoteUserId.equals(userId) && !lastKnownCursorPositions.containsKey(remoteUserId)) {
+                // If we don't have a cursor position for this user yet, initialize to -1
+                // (indicates no known position yet)
+                lastKnownCursorPositions.put(remoteUserId, -1);
+            }
+        }
+        
         // Make a copy to avoid concurrent modification issues
         final List<Consumer<Map<String, String>>> listenersCopy = new ArrayList<>(presenceListeners);
         final Map<String, String> userMapCopy = new HashMap<>(userMap);
@@ -657,6 +1054,7 @@ public class NetworkClient {
                     listener.accept(userMapCopy);
                 } catch (Exception e) {
                     System.err.println("Error in presence listener: " + e.getMessage());
+                    e.printStackTrace();
                 }
             }
         } else {
@@ -667,6 +1065,7 @@ public class NetworkClient {
                         listener.accept(userMapCopy);
                     } catch (Exception e) {
                         System.err.println("Error in presence listener: " + e.getMessage());
+                        e.printStackTrace();
                     }
                 }
             });
@@ -763,56 +1162,36 @@ public class NetworkClient {
         // Don't send empty content
         final String finalContent = (content == null) ? "" : content;
         
+        // Track document update frequency more strictly to prevent sync storms
+        long now = System.currentTimeMillis();
+        long lastDocUpdateTime = lastOperationTimes.getOrDefault("document_update", 0L);
+        
+        // Significantly increase throttling to 1000ms (1 second)
+        if (now - lastDocUpdateTime < 1000) {
+            System.out.println("Throttling document update - last update was " + (now - lastDocUpdateTime) + "ms ago");
+            return;
+        }
+        
+        // Record this update time
+        lastOperationTimes.put("document_update", now);
+        
+        // Create the message
         JsonObject message = new JsonObject();
         message.addProperty("type", "document_update");
         message.addProperty("userId", userId);
         message.addProperty("content", finalContent);
-        message.addProperty("timestamp", System.currentTimeMillis());
+        message.addProperty("timestamp", now);
+        
+        // Add a unique sequence number to help server detect duplicates
+        message.addProperty("seq", System.currentTimeMillis());
         
         // Add retry logic for important document updates
         try {
             webSocketClient.send(gson.toJson(message));
-            
-            // Add a small delay to allow the server to process before any further operations
-            try {
-                Thread.sleep(50);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-            
-            // For non-empty content, schedule an automatic resend after a delay
-            // to ensure other clients receive it
-            if (finalContent.length() > 0) {
-                new Thread(() -> {
-                    try {
-                        // Wait longer before second attempt
-                        Thread.sleep(500);
-                        if (connected) {
-                            // Add a sequence number to avoid duplicates on server
-                            message.addProperty("seq", System.currentTimeMillis());
-                            webSocketClient.send(gson.toJson(message));
-                            System.out.println("Sent followup document update with " + finalContent.length() + " chars");
-                        }
-                    } catch (Exception ex) {
-                        System.err.println("Scheduled resend failed: " + ex.getMessage());
-                    }
-                }).start();
-            }
+            System.out.println("Sent document update with " + finalContent.length() + " chars");
         } catch (Exception e) {
             System.err.println("Error sending document update: " + e.getMessage());
             e.printStackTrace();
-            
-            // Try again once after a short delay
-            new Thread(() -> {
-                try {
-                    Thread.sleep(100);
-                    if (connected) {
-                        webSocketClient.send(gson.toJson(message));
-                    }
-                } catch (Exception ex) {
-                    System.err.println("Retry failed: " + ex.getMessage());
-                }
-            }).start();
         }
     }
     
@@ -880,5 +1259,124 @@ public class NetworkClient {
         message.addProperty("operationType", operation.getType().toString());
         
         webSocketClient.send(gson.toJson(message));
+    }
+    
+    public void sendPresenceUpdate() {
+        if (!connected) {
+            return;
+        }
+        
+        try {
+            JsonObject message = new JsonObject();
+            message.addProperty("type", "presence");
+            message.addProperty("userId", userId);
+            message.addProperty("username", username);
+            message.addProperty("timestamp", System.currentTimeMillis());
+            webSocketClient.send(gson.toJson(message));
+        } catch (Exception e) {
+            System.err.println("Error sending presence update: " + e.getMessage());
+        }
+    }
+    
+    public void addConnectionListener(Consumer<Boolean> listener) {
+        connectionListeners.add(listener);
+    }
+    
+    private void notifyConnectionListeners(boolean connected) {
+        for (Consumer<Boolean> listener : connectionListeners) {
+            listener.accept(connected);
+        }
+    }
+    
+    /**
+     * Gets the last known cursor position for a specific user.
+     * @param userId The user ID
+     * @return The cursor position or null if unknown
+     */
+    public Integer getLastKnownCursorPosition(String userId) {
+        return lastKnownCursorPositions.get(userId);
+    }
+    
+    /**
+     * Sets the user ID
+     * @param userId The user ID to set
+     */
+    public void setUserId(String userId) {
+        this.userId = userId;
+    }
+    
+    /**
+     * Sets the username
+     * @param username The username to set
+     */
+    public void setUsername(String username) {
+        this.username = username;
+    }
+    
+    /**
+     * Checks if the client is connected to the server
+     * @return true if connected, false otherwise
+     */
+    public boolean isConnected() {
+        return connected && webSocketClient != null && webSocketClient.isOpen();
+    }
+    
+    /**
+     * Clears the sync history periodically to prevent memory leaks.
+     * This will run every 30 seconds to clean up the message history.
+     */
+    private void startSyncHistoryCleaner() {
+        // Clean up every 30 seconds
+        new Timer(true).schedule(new TimerTask() {
+            @Override
+            public void run() {
+                synchronized (recentlySyncedDocuments) {
+                    recentlySyncedDocuments.clear();
+                    System.out.println("Cleared sync history");
+                }
+            }
+        }, 30000, 30000);
+    }
+    
+    /**
+     * Sends a "leave session" message to properly clean up on the server.
+     * Should be called when the user intentionally leaves a session.
+     */
+    public void leaveSession() {
+        if (!connected) {
+            return;
+        }
+        
+        try {
+            JsonObject message = new JsonObject();
+            message.addProperty("type", "leave_session");
+            message.addProperty("userId", userId);
+            webSocketClient.send(gson.toJson(message));
+            System.out.println("Sent leave session message to server");
+        } catch (Exception e) {
+            System.err.println("Error sending leave session message: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Purges all users that might be disconnected from the client's perspective.
+     * This method is called when reconnecting to ensure a clean slate.
+     */
+    private void purgeDisconnectedUsers() {
+        // Clear all last known cursor positions
+        lastKnownCursorPositions.clear();
+        
+        // Create an empty user map and notify listeners to clear their user lists
+        Map<String, String> emptyUserMap = new HashMap<>();
+        
+        // Only add ourselves to this map
+        if (username != null && !username.isEmpty()) {
+            emptyUserMap.put(userId, username);
+        }
+        
+        // Notify listeners to rebuild their user lists with just ourselves
+        notifyPresenceListeners(emptyUserMap);
+        
+        System.out.println("Purged all disconnected users");
     }
 } 

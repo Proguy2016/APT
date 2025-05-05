@@ -20,9 +20,10 @@ public class LoginDialog {
     
     /**
      * Shows a login dialog and returns the authenticated user details.
+     * @param lastUsername The username from the last login session, can be null
      * @return A pair containing the username and user ID if login was successful, null otherwise.
      */
-    public static Pair<String, String> showLoginDialog() {
+    public static Pair<String, String> showLoginDialog(String lastUsername) {
         // Create the custom dialog
         Dialog<Pair<String, String>> dialog = new Dialog<>();
         dialog.setTitle("Login");
@@ -41,6 +42,11 @@ public class LoginDialog {
         
         TextField usernameField = new TextField();
         usernameField.setPromptText("Username");
+        // Set the last username if available
+        if (lastUsername != null && !lastUsername.isEmpty()) {
+            usernameField.setText(lastUsername);
+        }
+        
         PasswordField passwordField = new PasswordField();
         passwordField.setPromptText("Password");
         
@@ -142,6 +148,15 @@ public class LoginDialog {
         }
         
         return resultWrapper[0];
+    }
+    
+    /**
+     * Shows a login dialog and returns the authenticated user details.
+     * This overload is for backward compatibility.
+     * @return A pair containing the username and user ID if login was successful, null otherwise.
+     */
+    public static Pair<String, String> showLoginDialog() {
+        return showLoginDialog(null);
     }
     
     /**

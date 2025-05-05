@@ -1,6 +1,7 @@
 package com.project.network;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.project.crdt.CRDTCharacter;
 import com.project.crdt.Position;
@@ -9,8 +10,10 @@ import org.java_websocket.handshake.ClientHandshake;
 import org.java_websocket.server.WebSocketServer;
 
 import java.net.InetSocketAddress;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -36,6 +39,12 @@ public class CollaborativeEditorServer extends WebSocketServer {
     // Map of user ID to cursor position
     private final Map<String, Integer> userCursorPositions = new ConcurrentHashMap<>();
     
+    // Map of user ID to username
+    private final Map<String, String> userMap = new ConcurrentHashMap<>();
+    
+    // Map of user ID to username
+    private final Map<String, String> usernames = new ConcurrentHashMap<>();
+    
     public CollaborativeEditorServer() {
         super(new InetSocketAddress(DEFAULT_PORT));
     }
@@ -59,10 +68,15 @@ public class CollaborativeEditorServer extends WebSocketServer {
             EditorSession session = userSessions.get(userId);
             if (session != null) {
                 session.removeUser(userId);
+                
+                // Log the users that remain in the session
+                System.out.println("Users remaining in session: " + session.getAllUsers());
+                
                 if (session.isEmpty()) {
                     // Remove the session if it's empty
                     sessionsByCode.remove(session.getEditorCode());
                     sessionsByCode.remove(session.getViewerCode());
+                    System.out.println("Session removed as it's now empty");
                 } else {
                     // Notify other users that this user has left
                     broadcastPresenceUpdate(session);
@@ -85,8 +99,14 @@ public class CollaborativeEditorServer extends WebSocketServer {
                 userSessions.remove(userId);
             }
             
+            // Remove user from mappings
             userConnections.remove(userId);
             connectionToUserId.remove(conn);
+            usernames.remove(userId);
+            userCursorPositions.remove(userId);
+            
+            // Run a full cleanup to catch any orphaned sessions or users
+            cleanupInactiveConnections();
         }
     }
     
@@ -94,10 +114,65 @@ public class CollaborativeEditorServer extends WebSocketServer {
     public void onMessage(WebSocket conn, String message) {
         try {
             JsonObject jsonMessage = gson.fromJson(message, JsonObject.class);
-            handleMessage(conn, jsonMessage);
+            String type = jsonMessage.get("type").getAsString();
+            
+            switch (type) {
+                case "register":
+                    handleRegister(conn, jsonMessage);
+                    break;
+                case "create_session":
+                    handleCreateSession(conn, jsonMessage);
+                    break;
+                case "join_session":
+                    handleJoinSession(conn, jsonMessage);
+                    break;
+                case "leave_session":
+                    handleLeaveSession(conn, jsonMessage);
+                    break;
+                case "insert":
+                    handleInsert(conn, jsonMessage);
+                    break;
+                case "delete":
+                    handleDelete(conn, jsonMessage);
+                    break;
+                case "cursor_move":
+                    handleCursorMove(conn, jsonMessage);
+                    break;
+                case "document_update":
+                    handleDocumentUpdate(conn, jsonMessage);
+                    break;
+                case "instant_document_update":
+                    handleInstantDocumentUpdate(conn, jsonMessage);
+                    break;
+                case "undo":
+                    handleUndo(conn, jsonMessage);
+                    break;
+                case "redo":
+                    handleRedo(conn, jsonMessage);
+                    break;
+                case "sync_confirmation":
+                    handleSyncConfirmation(conn, jsonMessage);
+                    break;
+                case "request_resync":
+                    handleResyncRequest(conn, jsonMessage);
+                    break;
+                case "update_username":
+                case "username_update":
+                    handleUpdateUsername(conn, jsonMessage);
+                    break;
+                case "presence":
+                    handlePresenceUpdate(conn, jsonMessage);
+                    break;
+                case "request_presence":
+                    handleRequestPresence(conn, jsonMessage);
+                    break;
+                default:
+                    sendError(conn, "Unknown message type: " + type);
+            }
         } catch (Exception e) {
             System.err.println("Error processing message: " + e.getMessage());
             e.printStackTrace();
+            sendError(conn, "Error processing message: " + e.getMessage());
         }
     }
     
@@ -116,207 +191,522 @@ public class CollaborativeEditorServer extends WebSocketServer {
         System.out.println("WebSocket server started on port " + getPort());
     }
     
-    private void handleMessage(WebSocket conn, JsonObject message) {
-        String type = message.get("type").getAsString();
-        
-        try {
-            switch (type) {
-                case "register":
-                    handleRegister(conn, message);
-                    break;
-                case "create_session":
-                    handleCreateSession(conn, message);
-                    break;
-                case "join_session":
-                    handleJoinSession(conn, message);
-                    break;
-                case "insert":
-                    handleInsert(conn, message);
-                    break;
-                case "delete":
-                    handleDelete(conn, message);
-                    break;
-                case "cursor_move":
-                    handleCursorMove(conn, message);
-                    break;
-                case "document_update":
-                    handleDocumentUpdate(conn, message);
-                    break;
-                case "instant_document_update":
-                    handleInstantDocumentUpdate(conn, message);
-                    break;
-                case "undo":
-                    handleUndo(conn, message);
-                    break;
-                case "redo":
-                    handleRedo(conn, message);
-                    break;
-                case "sync_confirmation":
-                    handleSyncConfirmation(conn, message);
-                    break;
-                case "request_resync":
-                    handleResyncRequest(conn, message);
-                    break;
-                case "update_username":
-                    handleUpdateUsername(conn, message);
-                    break;
-                default:
-                    sendError(conn, "Unknown message type: " + type);
-            }
-        } catch (Exception e) {
-            System.err.println("Error processing message: " + e.getMessage());
-            e.printStackTrace();
-            sendError(conn, "Error processing message: " + e.getMessage());
-        }
-    }
-    
     private void handleRegister(WebSocket conn, JsonObject message) {
         String userId = message.get("userId").getAsString();
+        
+        // First check for existing connections with this user ID and clean them up
+        WebSocket existingConn = userConnections.get(userId);
+        if (existingConn != null && existingConn != conn && existingConn.isOpen()) {
+            System.out.println("Found existing connection for user " + userId + ", closing it");
+            try {
+                // Send disconnect message to the existing connection
+                JsonObject disconnectMsg = new JsonObject();
+                disconnectMsg.addProperty("type", "force_disconnect");
+                disconnectMsg.addProperty("reason", "New connection established");
+                existingConn.send(gson.toJson(disconnectMsg));
+                
+                // Close the existing connection
+                existingConn.close();
+            } catch (Exception e) {
+                System.err.println("Error closing existing connection: " + e.getMessage());
+            }
+        }
+        
+        // Store username if provided
+        String username = null;
+        if (message.has("username")) {
+            username = message.get("username").getAsString();
+            usernames.put(userId, username);
+        }
+        
         connectionToUserId.put(conn, userId);
         userConnections.put(userId, conn);
         
-        // Send confirmation
+        // Send acknowledgment
         JsonObject response = new JsonObject();
         response.addProperty("type", "register_ack");
         response.addProperty("userId", userId);
         conn.send(gson.toJson(response));
-        
-        System.out.println("Registered user: " + userId);
     }
     
     private void handleCreateSession(WebSocket conn, JsonObject message) {
         String userId = connectionToUserId.get(conn);
+        
         if (userId == null) {
             sendError(conn, "Not registered");
             return;
         }
         
-        // Generate unique codes for editor and viewer
-        String editorCode = generateUniqueCode("EDITOR");
-        String viewerCode = generateUniqueCode("VIEWER");
+        String sessionId = UUID.randomUUID().toString().substring(0, 6);
+        String documentTitle = message.has("title") ? message.get("title").getAsString() : "Untitled Document";
         
-        // Create a new session
-        EditorSession session = new EditorSession(editorCode, viewerCode);
+        // Create a new session with the same code for both editor and viewer for simplicity
+        EditorSession session = new EditorSession(sessionId, sessionId);
+        
+        // Add user as the initial editor
         session.addEditor(userId);
         
         // Store the session
-        sessionsByCode.put(editorCode, session);
-        sessionsByCode.put(viewerCode, session);
+        sessionsByCode.put(sessionId, session);
+        
+        // Associate the user with the session
         userSessions.put(userId, session);
         
-        // Send the codes to the user
+        // Set document title if provided
+        if (message.has("initialContent")) {
+            String initialContent = message.get("initialContent").getAsString();
+            session.setDocumentContent(initialContent);
+            System.out.println("Created session with initial content: " + initialContent.length() + " chars");
+        }
+        
+        // Send acknowledgment
         JsonObject response = new JsonObject();
-        response.addProperty("type", "session_created");
-        response.addProperty("editorCode", editorCode);
-        response.addProperty("viewerCode", viewerCode);
+        response.addProperty("type", "create_session_ack");
+        response.addProperty("sessionId", sessionId);
+        response.addProperty("documentTitle", documentTitle);
+        
         conn.send(gson.toJson(response));
+        
+        System.out.println("User " + userId + " created session with ID " + sessionId);
         
         // Broadcast presence update
         broadcastPresenceUpdate(session);
-        
-        System.out.println("Created session: " + editorCode + " (editor), " + viewerCode + " (viewer)");
     }
     
+    /**
+     * Handles a request from a client to join a session.
+     */
     private void handleJoinSession(WebSocket conn, JsonObject message) {
         String userId = connectionToUserId.get(conn);
-        String sessionCode = message.get("code").getAsString();
-        boolean asEditor = message.get("asEditor").getAsBoolean();
-        
         if (userId == null) {
             sendError(conn, "Not registered");
             return;
         }
         
-        // Find the session
-        EditorSession session = sessionsByCode.get(sessionCode);
-        if (session == null) {
-            sendError(conn, "Invalid session code");
+        // Check if we're joining with the old format (code) or new format (sessionId)
+        String sessionId;
+        if (message.has("code")) {
+            sessionId = message.get("code").getAsString();
+        } else if (message.has("sessionId")) {
+            sessionId = message.get("sessionId").getAsString();
+        } else {
+            sendError(conn, "Missing session identifier");
             return;
         }
         
-        // Check if the user is allowed to join as an editor
-        if (asEditor && !sessionCode.equals(session.getEditorCode())) {
-            sendError(conn, "Not authorized to join as editor");
-            return;
+        System.out.println("User " + userId + " is joining session " + sessionId);
+        
+        // Check if user is already in a session and remove them from it
+        EditorSession currentSession = userSessions.get(userId);
+        if (currentSession != null && !currentSession.getEditorCode().equals(sessionId) && 
+            !currentSession.getViewerCode().equals(sessionId)) {
+            // User is joining a different session, remove from current one
+            System.out.println("User " + userId + " is leaving previous session " + 
+                currentSession.getEditorCode() + " to join " + sessionId);
+            
+            currentSession.removeUser(userId);
+            
+            // If the session is now empty, remove it
+            if (currentSession.isEmpty()) {
+                sessionsByCode.remove(currentSession.getEditorCode());
+                sessionsByCode.remove(currentSession.getViewerCode());
+                System.out.println("Previous session removed as it's now empty");
+            } else {
+                // Notify remaining users about the departure
+                broadcastPresenceUpdate(currentSession);
+            }
         }
         
-        // Add the user to the session
+        // Get or create the session
+        final EditorSession session; 
+        EditorSession existingSession = sessionsByCode.get(sessionId);
+        if (existingSession == null) {
+            // Create a new session if it doesn't exist - makes joining more reliable
+            System.out.println("Session not found, creating new session: " + sessionId);
+            session = new EditorSession(sessionId, sessionId);
+            sessionsByCode.put(sessionId, session);
+        } else {
+            session = existingSession;
+        }
+        
+        // Check if joining as editor or viewer
+        boolean asEditor = message.has("asEditor") && message.get("asEditor").getAsBoolean();
+        
+        // Add user to session based on role
         if (asEditor) {
             session.addEditor(userId);
         } else {
             session.addViewer(userId);
         }
         
-        // Associate the user with the session
+        // Add session to user's sessions
         userSessions.put(userId, session);
         
-        // Send acknowledgment
-        JsonObject response = new JsonObject();
-        response.addProperty("type", "session_joined");
-        response.addProperty("editorCode", session.getEditorCode());
-        response.addProperty("viewerCode", session.getViewerCode());
-        response.addProperty("asEditor", asEditor);
-        conn.send(gson.toJson(response));
-        
-        // Broadcast presence update
-        broadcastPresenceUpdate(session);
-        
-        // Send initial cursor positions to the new user
-        for (String existingUserId : session.getAllUsers()) {
-            if (!existingUserId.equals(userId) && userCursorPositions.containsKey(existingUserId)) {
-                JsonObject cursorMsg = new JsonObject();
-                cursorMsg.addProperty("type", "cursor_move");
-                cursorMsg.addProperty("userId", existingUserId);
-                cursorMsg.addProperty("position", userCursorPositions.get(existingUserId));
-                conn.send(gson.toJson(cursorMsg));
+        // Get username if provided
+        if (message.has("username") && !message.get("username").isJsonNull()) {
+            String providedUsername = message.get("username").getAsString();
+            if (providedUsername != null && !providedUsername.isEmpty()) {
+                usernames.put(userId, providedUsername);
+                System.out.println("User joining with username: " + providedUsername);
             }
         }
         
-        // Sync document content for the new user if there's already content
-        if (session.getDocumentContent() != null && !session.getDocumentContent().isEmpty()) {
-            // Use a separate thread to ensure reliable delivery with multiple attempts
-            new Thread(() -> {
-                try {
-                    // First wait to ensure client is fully connected and ready
-                    Thread.sleep(500);
-                    
-                    // Make up to 3 attempts to send the document content
-                    boolean syncSuccessful = false;
-                    int attempts = 0;
-                    
-                    while (!syncSuccessful && attempts < 3 && conn.isOpen()) {
-                        attempts++;
-                        
-                        // Send document content
-                        JsonObject syncMsg = new JsonObject();
-                        syncMsg.addProperty("type", "document_sync");
-                        syncMsg.addProperty("content", session.getDocumentContent());
-                        syncMsg.addProperty("syncAttempt", attempts);
-                        conn.send(gson.toJson(syncMsg));
-                        
-                        // Send confirmation request and wait for response
-                        JsonObject confirmReqMsg = new JsonObject();
-                        confirmReqMsg.addProperty("type", "sync_confirmation_request");
-                        confirmReqMsg.addProperty("documentLength", session.getDocumentContent().length());
-                        conn.send(gson.toJson(confirmReqMsg));
-                        
-                        // Wait for next attempt if needed
-                        if (attempts < 3) {
-                            Thread.sleep(1000);
-                        }
-                    }
-                    
-                    // Log sync attempt outcome
-                    if (attempts >= 3) {
-                        System.out.println("Warning: Document sync with user " + userId + " may not be complete after " + attempts + " attempts");
-                    }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            }).start();
+        // Create a proper usernames object with full usernames
+        JsonObject usernamesObject = new JsonObject();
+        for (String user : session.getAllUsers()) {
+            // Get the username for this user, with a fallback
+            String username = usernames.get(user);
+            if (username == null || username.isEmpty()) {
+                // Generate a nicer anonymous name if no username is available
+                username = "User-" + user.substring(0, Math.min(6, user.length()));
+            }
+            usernamesObject.addProperty(user, username);
         }
         
-        System.out.println("User " + userId + " joined session with code " + sessionCode + " as " + (asEditor ? "editor" : "viewer"));
+        // Create the join response
+        JsonObject response = new JsonObject();
+        response.addProperty("type", "join_session_ack");
+        response.addProperty("sessionId", sessionId);
+        
+        // Send document content if available
+        String documentContent = session.getDocument();
+        if (documentContent != null && !documentContent.isEmpty()) {
+            System.out.println("Sending document content to new user (" + documentContent.length() + " characters)");
+            response.addProperty("documentContent", documentContent);
+        } else {
+            System.out.println("No document content available for session " + sessionId);
+        }
+        
+        // Add usernames to response
+        response.add("usernames", usernamesObject);
+        
+        // Send the join response to the client that joined
+        conn.send(gson.toJson(response));
+        
+        // Force immediate username broadcast to ensure all clients have current info
+        broadcastUsernames(session);
+        
+        // Then broadcast presence update to all participants
+        broadcastPresenceUpdate(session);
+        
+        // After a delay, do another set of presence broadcasts to ensure everyone is in sync
+        final String finalUserId = userId;
+        final EditorSession finalSession = session;
+        new Thread(() -> {
+            try {
+                // Wait a short time to allow initial setup to complete
+                Thread.sleep(500);
+                
+                // Second broadcast of usernames
+                broadcastUsernames(finalSession);
+                
+                // Second broadcast of presence
+                broadcastPresenceUpdate(finalSession);
+                
+                // Send a direct presence update to the newly joined user
+                sendPresenceToUser(finalUserId, finalSession);
+                
+                // Special high-priority presence update to all existing users
+                sendHighPriorityPresenceUpdate(finalSession, finalUserId);
+                
+                // After another delay, do one final presence update
+                Thread.sleep(500);
+                broadcastPresenceUpdate(finalSession);
+            } catch (Exception e) {
+                System.err.println("Error during delayed presence update: " + e.getMessage());
+            }
+        }).start();
+    }
+    
+    /**
+     * Sends a direct presence update to a specific user
+     */
+    private void sendPresenceToUser(String targetUserId, EditorSession session) {
+        if (session == null || targetUserId == null) {
+            return;
+        }
+        
+        try {
+            WebSocket conn = userConnections.get(targetUserId);
+            if (conn == null || !conn.isOpen()) {
+                return;
+            }
+            
+            // Create a filtered map of valid users in the session
+            Map<String, String> userMap = new HashMap<>();
+            
+            for (String userId : session.getAllUsers()) {
+                // Skip disconnected users
+                WebSocket userConn = userConnections.get(userId);
+                if (userConn == null || !userConn.isOpen()) {
+                    continue;
+                }
+                
+                // Skip UUID-format users
+                if (userId.contains("-") || userId.length() > 24) {
+                    continue;
+                }
+                
+                // Get username
+                String username = usernames.get(userId);
+                if (username == null || username.isEmpty()) {
+                    continue;
+                }
+                
+                userMap.put(userId, username);
+            }
+            
+            // Create presence message
+            JsonObject message = new JsonObject();
+            message.addProperty("type", "presence");
+            message.addProperty("highPriority", true);
+            message.add("users", gson.toJsonTree(userMap));
+            
+            // Send to the target user
+            conn.send(gson.toJson(message));
+            System.out.println("Sent direct presence update to user " + targetUserId);
+        } catch (Exception e) {
+            System.err.println("Error sending direct presence update: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Sends a high-priority presence update to all users in a session, 
+     * notifying them about a newly joined user.
+     */
+    private void sendHighPriorityPresenceUpdate(EditorSession session, String newUserId) {
+        if (session == null || newUserId == null) {
+            return;
+        }
+        
+        try {
+            // Get the username of the new user
+            String newUsername = usernames.get(newUserId);
+            if (newUsername == null || newUsername.isEmpty()) {
+                // Use a default name if not set
+                newUsername = "User-" + newUserId.substring(0, Math.min(6, newUserId.length()));
+            }
+            
+            System.out.println("Sending high-priority notification about user: " + newUsername + " (" + newUserId + ")");
+            
+            // First send a dedicated user_joined message
+            JsonObject joinMessage = new JsonObject();
+            joinMessage.addProperty("type", "user_joined");
+            joinMessage.addProperty("userId", newUserId);
+            joinMessage.addProperty("username", newUsername);
+            
+            // Create a map of userIds to usernames
+            JsonObject newUserObj = new JsonObject();
+            newUserObj.addProperty(newUserId, newUsername);
+            joinMessage.add("users", newUserObj);
+            
+            // Then also send a full presence update with all users
+            JsonObject presenceMessage = new JsonObject();
+            presenceMessage.addProperty("type", "presence");
+            presenceMessage.addProperty("highPriority", true);
+            
+            // Create a full user map for all users in the session
+            JsonObject fullUserObj = new JsonObject();
+            for (String userId : session.getAllUsers()) {
+                String username = usernames.get(userId);
+                if (username == null || username.isEmpty()) {
+                    // Use a default name if not set
+                    username = "User-" + userId.substring(0, Math.min(6, userId.length()));
+                }
+                fullUserObj.addProperty(userId, username);
+            }
+            
+            presenceMessage.add("users", fullUserObj);
+            
+            // Send both messages to all users in the session except the new user
+            for (String userId : session.getAllUsers()) {
+                WebSocket conn = userConnections.get(userId);
+                if (conn != null && conn.isOpen()) {
+                    // First send the dedicated join notification
+                    conn.send(gson.toJson(joinMessage));
+                    
+                    // Then send the full presence update
+                    conn.send(gson.toJson(presenceMessage));
+                    
+                    System.out.println("Sent notification to user: " + userId);
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Error sending high-priority presence update: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    
+    /**
+     * Broadcasts the list of usernames to all clients in a session.
+     * @param session The session to broadcast to.
+     */
+    private void broadcastUsernames(EditorSession session) {
+        if (session == null || session.isEmpty()) {
+            return;
+        }
+        
+        try {
+            // Create a map of all userIDs to usernames in this session
+            JsonObject message = new JsonObject();
+            message.addProperty("type", "usernames");
+            
+            JsonObject usernamesObj = new JsonObject();
+            
+            // Add all users in the session with active connections
+            for (String userId : session.getAllUsers()) {
+                // Skip users without active connections
+                WebSocket conn = userConnections.get(userId);
+                if (conn == null || !conn.isOpen()) {
+                    continue;
+                }
+                
+                String username = usernames.get(userId);
+                if (username == null || username.isEmpty()) {
+                    // Use a default name if no username is set
+                    username = "User-" + userId.substring(0, Math.min(6, userId.length()));
+                }
+                
+                // Format username nicely if needed
+                if (username.startsWith("User-") && username.length() > 5) {
+                    username = "User " + username.substring(5);
+                }
+                
+                usernamesObj.addProperty(userId, username);
+                System.out.println("Adding user to broadcast: " + userId + " -> " + username);
+            }
+            
+            message.add("usernames", usernamesObj);
+            
+            // Only broadcast if we have valid users
+            if (usernamesObj.size() > 0) {
+                // Broadcast to all valid users in the session
+                String messageJson = gson.toJson(message);
+                for (String userId : session.getAllUsers()) {
+                    WebSocket conn = userConnections.get(userId);
+                    if (conn != null && conn.isOpen()) {
+                        conn.send(messageJson);
+                    }
+                }
+                
+                System.out.println("Broadcasted " + usernamesObj.size() + " usernames to session");
+            } else {
+                System.out.println("No valid users to broadcast usernames for");
+            }
+        } catch (Exception e) {
+            System.err.println("Error broadcasting usernames: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * Updates the list of active users in a session.
+     * This is more aggressively filtered to remove phantom users.
+     */
+    private void broadcastPresenceUpdate(EditorSession session) {
+        if (session == null || session.isEmpty()) {
+            return;
+        }
+        
+        JsonObject message = new JsonObject();
+        message.addProperty("type", "presence");
+        
+        // First run a cleanup to ensure we don't have phantom users
+        cleanupInactiveConnections();
+        
+        // Create a map of user IDs to usernames
+        Map<String, String> userMap = new HashMap<>();
+        
+        // Filter out inactive or suspicious users
+        Set<String> validUsers = new HashSet<>();
+        for (String userId : session.getAllUsers()) {
+            // Skip users without active connections
+            WebSocket conn = userConnections.get(userId);
+            if (conn == null || !conn.isOpen()) {
+                System.out.println("Skipping inactive user: " + userId);
+                continue;
+            }
+            
+            // Skip UUID-format users (containing hyphens)
+            if (userId.contains("-")) {
+                System.out.println("Skipping UUID-format user: " + userId);
+                continue;
+            }
+            
+            // Skip excessively long user IDs (MongoDB IDs are 24 chars)
+            if (userId.length() > 24) {
+                System.out.println("Skipping overly long user ID: " + userId);
+                continue;
+            }
+            
+            // Get username
+            String username = usernames.get(userId);
+            
+            // Filter out users with invalid usernames
+            if (username == null || username.isEmpty()) {
+                System.out.println("Skipping user with empty username: " + userId);
+                continue;
+            }
+            
+            // Skip users with UUID-like usernames
+            if (username.contains("-") && username.length() > 20) {
+                System.out.println("Skipping user with UUID-like username: " + username);
+                continue;
+            }
+            
+            // This user passed all filters
+            validUsers.add(userId);
+            
+            // Use a friendly format for the username
+            if (username == null || username.isEmpty()) {
+                username = "User " + userId.substring(0, Math.min(6, userId.length()));
+            }
+            
+            userMap.put(userId, username);
+        }
+        
+        System.out.println("Broadcasting presence update for session " + session.getEditorCode() + 
+                           " with " + validUsers.size() + " valid users");
+        
+        // Add the user map to the message
+        message.add("users", gson.toJsonTree(userMap));
+        
+        // Also include the specific role information
+        JsonArray editorsArray = new JsonArray();
+        for (String editor : session.getEditors()) {
+            // Only include editors who passed our filtering
+            if (validUsers.contains(editor)) {
+                editorsArray.add(editor);
+            }
+        }
+        message.add("editors", editorsArray);
+        
+        JsonArray viewersArray = new JsonArray();
+        for (String viewer : session.getViewers()) {
+            // Only include viewers who passed our filtering
+            if (validUsers.contains(viewer)) {
+                viewersArray.add(viewer);
+            }
+        }
+        message.add("viewers", viewersArray);
+        
+        // Send to all filtered users in the session
+        for (String userId : validUsers) {
+            WebSocket conn = userConnections.get(userId);
+            if (conn != null && conn.isOpen()) {
+                try {
+                    conn.send(gson.toJson(message));
+                } catch (Exception e) {
+                    System.err.println("Error sending presence update to " + userId + ": " + e.getMessage());
+                }
+            }
+        }
+        
+        // Update user lists in the session object to match what we just sent
+        session.syncUserLists(validUsers);
+        
+        // Log the current users for debugging
+        System.out.println("Session " + session.getEditorCode() + " has users: " + userMap);
     }
     
     private void handleInsert(WebSocket conn, JsonObject message) {
@@ -365,6 +755,10 @@ public class CollaborativeEditorServer extends WebSocketServer {
         broadcastToSession(session, message, userId);
     }
     
+    /**
+     * Handles cursor movement from a client.
+     * Optimized for high-frequency cursor updates.
+     */
     private void handleCursorMove(WebSocket conn, JsonObject message) {
         String userId = connectionToUserId.get(conn);
         int position = message.get("position").getAsInt();
@@ -381,16 +775,28 @@ public class CollaborativeEditorServer extends WebSocketServer {
         }
         
         // Store the cursor position
-        userCursorPositions.put(userId, position);
+        Integer oldPosition = userCursorPositions.put(userId, position);
+        
+        // If position hasn't changed significantly (within 5 characters), don't broadcast
+        // This reduces network traffic for minor cursor movements
+        if (oldPosition != null && Math.abs(oldPosition - position) < 5) {
+            return;
+        }
         
         // Forward the cursor move to all users in the session except the sender
-        // We'll optimize to send less traffic by omitting the userId
-        // from the sender's own cursor move messages
-        for (String otherUserId : session.getAllUsers()) {
+        // We'll optimize to reduce network traffic
+        Set<String> targetUsers = session.getAllUsers();
+        if (targetUsers.size() > 1) { // Only broadcast if there are other users
+            for (String otherUserId : targetUsers) {
             if (!otherUserId.equals(userId)) {
                 WebSocket otherConn = userConnections.get(otherUserId);
                 if (otherConn != null && otherConn.isOpen()) {
+                        try {
                     otherConn.send(gson.toJson(message));
+                        } catch (Exception e) {
+                            System.err.println("Error sending cursor update to " + otherUserId + ": " + e.getMessage());
+                        }
+                    }
                 }
             }
         }
@@ -398,7 +804,6 @@ public class CollaborativeEditorServer extends WebSocketServer {
     
     private void handleDocumentUpdate(WebSocket conn, JsonObject message) {
         String userId = connectionToUserId.get(conn);
-        
         if (userId == null) {
             sendError(conn, "Not registered");
             return;
@@ -410,26 +815,41 @@ public class CollaborativeEditorServer extends WebSocketServer {
             return;
         }
         
-        // Check if the user is an editor
+        // Only editors can update document content
         if (!session.isEditor(userId)) {
             sendError(conn, "Not authorized to edit");
             return;
         }
         
-        // Update the session's document content
+        // Update document content in session
         String content = message.get("content").getAsString();
-        session.setDocumentContent(content);
-    }
-    
-    private void broadcastPresenceUpdate(EditorSession session) {
-        JsonObject message = new JsonObject();
-        message.addProperty("type", "presence");
-        message.add("users", gson.toJsonTree(session.getAllUsers()));
         
-        for (String userId : session.getAllUsers()) {
-            WebSocket conn = userConnections.get(userId);
-            if (conn != null && conn.isOpen()) {
-                conn.send(gson.toJson(message));
+        // Check if content has changed
+        String currentContent = session.getDocument();
+        if (content.equals(currentContent)) {
+            System.out.println("Document update ignored - content unchanged");
+            return;
+        }
+        
+        session.updateDocument(content);
+        System.out.println("Document updated by user " + userId + " (" + content.length() + " characters)");
+        
+        // Broadcast to all users in the session except sender
+        JsonObject broadcastMsg = new JsonObject();
+        broadcastMsg.addProperty("type", "document_sync");
+        broadcastMsg.addProperty("content", content);
+        broadcastMsg.addProperty("senderId", userId);
+        
+        for (String user : session.getUsers()) {
+            if (!user.equals(userId)) {  // Skip the sender
+                WebSocket userConn = userConnections.get(user);
+                if (userConn != null && userConn.isOpen()) {
+                    try {
+                        userConn.send(gson.toJson(broadcastMsg));
+                    } catch (Exception e) {
+                        System.err.println("Error sending document update to user " + user + ": " + e.getMessage());
+                    }
+                }
             }
         }
     }
@@ -469,33 +889,38 @@ public class CollaborativeEditorServer extends WebSocketServer {
      */
     private void handleSyncConfirmation(WebSocket conn, JsonObject message) {
         String userId = connectionToUserId.get(conn);
-        int receivedLength = message.get("receivedLength").getAsInt();
-        
         if (userId == null) {
+            sendError(conn, "Not registered");
             return;
         }
         
+        int receivedLength = message.get("receivedLength").getAsInt();
+        System.out.println("User " + userId + " confirmed document sync with " + receivedLength + " characters");
+        
+        // Check if the user is in a session
         EditorSession session = userSessions.get(userId);
         if (session == null) {
+            System.out.println("Warning: Sync confirmation from user not in a session: " + userId);
             return;
         }
         
-        // Check if the client has the correct document length
-        int expectedLength = session.getDocumentContent().length();
-        
-        if (receivedLength == expectedLength) {
-            System.out.println("Document sync confirmed for user " + userId + 
-                " (length: " + receivedLength + ")");
-        } else {
-            System.out.println("Document sync mismatch for user " + userId + 
-                " (received: " + receivedLength + ", expected: " + expectedLength + ")");
+        // Check if the document length matches what we have
+        String docContent = session.getDocument();
+        if (docContent != null && docContent.length() != receivedLength) {
+            System.out.println("Document length mismatch: server=" + docContent.length() + ", client=" + receivedLength);
             
-            // Re-send the document content if mismatch
-            JsonObject syncMsg = new JsonObject();
-            syncMsg.addProperty("type", "document_sync");
-            syncMsg.addProperty("content", session.getDocumentContent());
-            syncMsg.addProperty("syncRetry", true);
-            conn.send(gson.toJson(syncMsg));
+            // Send a new document sync to correct the mismatch
+            JsonObject syncMessage = new JsonObject();
+            syncMessage.addProperty("type", "document_sync");
+            syncMessage.addProperty("content", docContent);
+            syncMessage.addProperty("highPriority", true);  // Mark as high priority
+            
+            try {
+                conn.send(gson.toJson(syncMessage));
+                System.out.println("Sent corrective document sync to user " + userId);
+            } catch (Exception e) {
+                System.err.println("Error sending corrective sync: " + e.getMessage());
+            }
         }
     }
     
@@ -525,13 +950,23 @@ public class CollaborativeEditorServer extends WebSocketServer {
         
         // Immediately update the session's document content
         String content = message.get("content").getAsString();
+        
+        // Add a uniqueness check to prevent duplicate updates
+        String currentContent = session.getDocument();
+        if (content.equals(currentContent)) {
+            System.out.println("Ignoring duplicate document update with same content");
+            return;
+        }
+        
         session.setDocumentContent(content);
+        System.out.println("Instant document update from user " + userId + " (" + content.length() + " chars)");
         
         // Forward to all other users in session with high priority
         JsonObject forwardMsg = new JsonObject();
         forwardMsg.addProperty("type", "document_sync");
         forwardMsg.addProperty("content", content);
         forwardMsg.addProperty("highPriority", true);
+        forwardMsg.addProperty("timestamp", System.currentTimeMillis()); // Add timestamp for deduplication
         
         // Get the operation type (undo/redo)
         String operation = message.has("operation") ? message.get("operation").getAsString() : "";
@@ -627,15 +1062,25 @@ public class CollaborativeEditorServer extends WebSocketServer {
             return;
         }
         
-        // Send the current document state to the requester
-        JsonObject syncMsg = new JsonObject();
-        syncMsg.addProperty("type", "document_sync");
-        syncMsg.addProperty("content", session.getDocumentContent());
-        syncMsg.addProperty("highPriority", true);
-        conn.send(gson.toJson(syncMsg));
+        System.out.println("Document resync requested by user " + userId);
         
-        System.out.println("Sent document resync to user " + userId + 
-                           " (content length: " + session.getDocumentContent().length() + ")");
+        // Send the current document content
+        String docContent = session.getDocument();
+        if (docContent != null) {
+            JsonObject syncMessage = new JsonObject();
+            syncMessage.addProperty("type", "document_sync");
+            syncMessage.addProperty("content", docContent);
+            syncMessage.addProperty("highPriority", true);
+            
+            try {
+                conn.send(gson.toJson(syncMessage));
+                System.out.println("Sent document resync to user " + userId + " (" + docContent.length() + " chars)");
+            } catch (Exception e) {
+                System.err.println("Error sending document resync: " + e.getMessage());
+            }
+        } else {
+            System.out.println("No document content available for resync");
+        }
     }
     
     /**
@@ -649,29 +1094,233 @@ public class CollaborativeEditorServer extends WebSocketServer {
             return;
         }
         
-        // Get the username
-        String username = message.get("username").getAsString();
+        // Check if username is provided before trying to access it
+        if (!message.has("username")) {
+            sendError(conn, "Username not provided");
+            return;
+        }
         
-        // Store the username with the user
-        // Note: In a real implementation, you'd probably store this in a database
-        System.out.println("User " + userId + " updated username to " + username);
+        // Handle possible null value
+        String username = null;
+        try {
+            if (!message.get("username").isJsonNull()) {
+                username = message.get("username").getAsString();
+            }
+        } catch (Exception e) {
+            System.err.println("Error parsing username: " + e.getMessage());
+            username = null;
+        }
         
-        // Forward to all sessions the user is part of
+        // Provide a default if username is still null
+        if (username == null || username.trim().isEmpty()) {
+            username = "User-" + userId.substring(0, Math.min(6, userId.length()));
+        }
+        
+        // Update the username
+        usernames.put(userId, username);
+        System.out.println("Updated username for user " + userId + " to: " + username);
+        
+        // Get the user's session and broadcast the update to all session members
         EditorSession session = userSessions.get(userId);
         if (session != null) {
-            JsonObject updateMsg = new JsonObject();
-            updateMsg.addProperty("type", "update_username");
-            updateMsg.addProperty("userId", userId);
-            updateMsg.addProperty("username", username);
+            broadcastPresenceUpdate(session);
+            broadcastUsernames(session);
+        }
+        
+        // Send confirmation back to the client
+        JsonObject response = new JsonObject();
+        response.addProperty("type", "username_update_ack");
+        response.addProperty("status", "success");
+        response.addProperty("username", username);
+        conn.send(gson.toJson(response));
+    }
+    
+    /**
+     * Handles a presence update from a client
+     */
+    private void handlePresenceUpdate(WebSocket conn, JsonObject message) {
+        String userId = connectionToUserId.get(conn);
+        
+        if (userId == null) {
+            return; // Silently ignore presence updates from unregistered users
+        }
+        
+        // Simply receiving this message confirms the user is still active
+        // Update the user's connection timestamp if needed
+        // No need to broadcast to other users as this is just for keeping connection alive
+        
+        // Update username if provided
+        if (message.has("username") && !message.get("username").isJsonNull()) {
+            String username = message.get("username").getAsString();
+            if (username != null && !username.isEmpty()) {
+                usernames.put(userId, username);
+            }
+        }
+    }
+    
+    /**
+     * Handles a request from a client to leave their current session
+     */
+    private void handleLeaveSession(WebSocket conn, JsonObject message) {
+        String userId = connectionToUserId.get(conn);
+        
+        if (userId == null) {
+            sendError(conn, "Not registered");
+            return;
+        }
+        
+        EditorSession session = userSessions.get(userId);
+        if (session == null) {
+            // User is not in a session, nothing to do
+            return;
+        }
+        
+        System.out.println("User " + userId + " is leaving session: " + session.getEditorCode());
+        
+        // Remove user from the session
+        session.removeUser(userId);
+        
+        // Remove session from user's sessions
+        userSessions.remove(userId);
+        
+        // Send acknowledgment
+        JsonObject response = new JsonObject();
+        response.addProperty("type", "leave_session_ack");
+        response.addProperty("status", "success");
+        conn.send(gson.toJson(response));
+        
+        // If session is now empty, remove it
+        if (session.isEmpty()) {
+            sessionsByCode.remove(session.getEditorCode());
+            sessionsByCode.remove(session.getViewerCode());
+            System.out.println("Session removed as it's now empty");
+        } else {
+            // Notify remaining users about the departure
+            broadcastPresenceUpdate(session);
+            broadcastUsernames(session);
+        }
+        
+        // Clean up any cursor position
+        userCursorPositions.remove(userId);
+        
+        // Broadcast cursor removal to other users in the session
+        JsonObject cursorRemoveMsg = new JsonObject();
+        cursorRemoveMsg.addProperty("type", "cursor_remove");
+        cursorRemoveMsg.addProperty("userId", userId);
             
             for (String otherUserId : session.getAllUsers()) {
-                if (!otherUserId.equals(userId)) {
                     WebSocket otherConn = userConnections.get(otherUserId);
                     if (otherConn != null && otherConn.isOpen()) {
-                        otherConn.send(gson.toJson(updateMsg));
+                otherConn.send(gson.toJson(cursorRemoveMsg));
+            }
+        }
+    }
+    
+    /**
+     * Performs cleanup of inactive connections and sessions
+     */
+    private void cleanupInactiveConnections() {
+        try {
+            // Check all connections to see if they're still open
+            Set<String> inactiveUsers = new HashSet<>();
+            
+            // First identify disconnected users
+            for (Map.Entry<String, WebSocket> entry : userConnections.entrySet()) {
+                String userId = entry.getKey();
+                WebSocket conn = entry.getValue();
+                
+                if (conn == null || !conn.isOpen()) {
+                    inactiveUsers.add(userId);
+                    System.out.println("Detected inactive connection for user: " + userId);
+                }
+            }
+            
+            // Also check for orphaned users in sessions with no active connections
+            for (String userId : userSessions.keySet()) {
+                if (!userConnections.containsKey(userId) || !userConnections.get(userId).isOpen()) {
+                    inactiveUsers.add(userId);
+                    System.out.println("Detected orphaned user in session: " + userId);
+                }
+            }
+            
+            // Remove inactive users
+            for (String userId : inactiveUsers) {
+                System.out.println("Cleaning up inactive user: " + userId);
+                
+                // Remove from their session
+                EditorSession session = userSessions.get(userId);
+                if (session != null) {
+                    session.removeUser(userId);
+                    
+                    if (session.isEmpty()) {
+                        sessionsByCode.remove(session.getEditorCode());
+                        sessionsByCode.remove(session.getViewerCode());
+                        System.out.println("Removed empty session during cleanup");
+                    } else {
+                        // Broadcast updated presence and usernames to remaining users
+                        broadcastPresenceUpdate(session);
+                        broadcastUsernames(session);
+                    }
+                }
+                
+                // Remove from all mappings
+                userSessions.remove(userId);
+                userConnections.remove(userId);
+                userCursorPositions.remove(userId);
+                usernames.remove(userId);
+                
+                // Remove from connectionToUserId (find the connection for this userId)
+                for (Map.Entry<WebSocket, String> entry : new HashMap<>(connectionToUserId).entrySet()) {
+                    if (userId.equals(entry.getValue())) {
+                        connectionToUserId.remove(entry.getKey());
                     }
                 }
             }
+            
+            if (!inactiveUsers.isEmpty()) {
+                System.out.println("Cleaned up " + inactiveUsers.size() + " inactive users");
+                
+                // Debug - list remaining users
+                System.out.println("Remaining active users: " + userConnections.keySet());
+            }
+            
+            // Check for orphaned sessions with no users
+            List<String> orphanedSessions = new ArrayList<>();
+            for (Map.Entry<String, EditorSession> entry : sessionsByCode.entrySet()) {
+                if (entry.getValue().isEmpty()) {
+                    orphanedSessions.add(entry.getKey());
+                }
+            }
+            
+            // Remove orphaned sessions
+            for (String sessionCode : orphanedSessions) {
+                sessionsByCode.remove(sessionCode);
+                System.out.println("Removed orphaned session: " + sessionCode);
+            }
+            
+        } catch (Exception e) {
+            System.err.println("Error during connection cleanup: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Tests if a user is still connected by sending a ping message.
+     * @param userId The user ID to test
+     * @return true if the user is connected, false otherwise
+     */
+    private boolean isUserConnected(String userId) {
+        WebSocket conn = userConnections.get(userId);
+        if (conn == null || !conn.isOpen()) {
+            return false;
+        }
+        
+        try {
+            // Try to send a ping
+            conn.sendPing();
+            return true;
+        } catch (Exception e) {
+            System.err.println("Error pinging user " + userId + ": " + e.getMessage());
+            return false;
         }
     }
     
@@ -679,42 +1328,16 @@ public class CollaborativeEditorServer extends WebSocketServer {
      * Class representing an editing session
      */
     private static class EditorSession {
-        private final String editorCode;
-        private final String viewerCode;
-        private final Set<String> editors = new HashSet<>();
-        private final Set<String> viewers = new HashSet<>();
+        private Set<String> editors = new HashSet<>();
+        private Set<String> viewers = new HashSet<>();
+        private String editorCode;
+        private String viewerCode;
         private String documentContent = "";
+        private long lastActivityTime = System.currentTimeMillis();
         
         public EditorSession(String editorCode, String viewerCode) {
             this.editorCode = editorCode;
             this.viewerCode = viewerCode;
-        }
-        
-        public void addEditor(String userId) {
-            editors.add(userId);
-        }
-        
-        public void addViewer(String userId) {
-            viewers.add(userId);
-        }
-        
-        public void removeUser(String userId) {
-            editors.remove(userId);
-            viewers.remove(userId);
-        }
-        
-        public boolean isEditor(String userId) {
-            return editors.contains(userId);
-        }
-        
-        public boolean isEmpty() {
-            return editors.isEmpty() && viewers.isEmpty();
-        }
-        
-        public Set<String> getAllUsers() {
-            Set<String> allUsers = new HashSet<>(editors);
-            allUsers.addAll(viewers);
-            return allUsers;
         }
         
         public String getEditorCode() {
@@ -725,13 +1348,134 @@ public class CollaborativeEditorServer extends WebSocketServer {
             return viewerCode;
         }
         
-        public String getDocumentContent() {
-            return documentContent;
+        public void addEditor(String userId) {
+            editors.add(userId);
+            updateActivity();
+        }
+        
+        public void addViewer(String userId) {
+            viewers.add(userId);
+            updateActivity();
+        }
+        
+        public void addUser(String userId) {
+            // By default, add as editor for simplicity in our updated model
+            editors.add(userId);
+            updateActivity();
+            System.out.println("Added user " + userId + " as editor");
+        }
+        
+        public boolean isEditor(String userId) {
+            return editors.contains(userId);
+        }
+        
+        public Set<String> getEditors() {
+            return editors;
+        }
+        
+        public Set<String> getViewers() {
+            return viewers;
+        }
+        
+        public Set<String> getAllUsers() {
+            Set<String> allUsers = new HashSet<>(editors);
+            allUsers.addAll(viewers);
+            return allUsers;
         }
         
         public void setDocumentContent(String content) {
             this.documentContent = content;
+            updateActivity();
         }
+        
+        public String getDocumentContent() {
+            return documentContent;
+        }
+        
+        public String getDocument() {
+            return documentContent;
+        }
+        
+        public void updateDocument(String content) {
+            this.documentContent = content;
+            updateActivity();
+        }
+        
+        public Set<String> getUsers() {
+            Set<String> users = new HashSet<>(editors);
+            users.addAll(viewers);
+            return users;
+        }
+        
+        public void removeUser(String userId) {
+            editors.remove(userId);
+            viewers.remove(userId);
+            updateActivity();
+        }
+        
+        public boolean isEmpty() {
+            return editors.isEmpty() && viewers.isEmpty();
+        }
+        
+        public void syncUserLists(Set<String> filteredUsers) {
+            // Update editor list - only keep users who are both in the filtered list and were editors
+            Set<String> newEditors = new HashSet<>();
+            for (String userId : filteredUsers) {
+                if (editors.contains(userId)) {
+                    newEditors.add(userId);
+                }
+            }
+            editors = newEditors;
+            
+            // Update viewer list - only keep users who are both in the filtered list and were viewers
+            Set<String> newViewers = new HashSet<>();
+            for (String userId : filteredUsers) {
+                if (viewers.contains(userId)) {
+                    newViewers.add(userId);
+                }
+            }
+            viewers = newViewers;
+            
+            updateActivity();
+        }
+        
+        private void updateActivity() {
+            lastActivityTime = System.currentTimeMillis();
+        }
+        
+        public long getLastActivityTime() {
+            return lastActivityTime;
+        }
+        
+        public boolean isInactive() {
+            // Session is inactive if no activity for more than 2 hours
+            return System.currentTimeMillis() - lastActivityTime > 7200000;
+        }
+    }
+    
+    /**
+     * Handles a request for presence updates
+     */
+    private void handleRequestPresence(WebSocket conn, JsonObject message) {
+        String userId = connectionToUserId.get(conn);
+        
+        if (userId == null) {
+            return; // Silently ignore if not registered
+        }
+        
+        System.out.println("Received presence request from user: " + userId);
+        
+        // Find the session the user is in
+        EditorSession session = userSessions.get(userId);
+        if (session == null) {
+            return; // Not in a session
+        }
+        
+        // Send a direct presence update to this user
+        sendPresenceToUser(userId, session);
+        
+        // Also broadcast usernames
+        broadcastUsernames(session);
     }
     
     public static void main(String[] args) {

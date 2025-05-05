@@ -1,6 +1,6 @@
-com\project\ui\DocumentSelectionDialog$1.class
 com\project\ui\DocumentSelectionDialog$DocumentItem.class
 com\project\Main.class
+com\project\network\NetworkClient$2.class
 com\project\network\Operation.class
 com\project\ui\EditorController$2.class
 com\project\ui\EditorController$1.class

@@ -23,8 +23,8 @@ import java.util.UUID;
  * This implementation can work without MongoDB by using in-memory storage.
  */
 public class DatabaseService {
-    // Update the connection string with a more generic format for safety
-    private static final String CONNECTION_STRING = "mongodb+srv://youssefshafik04:1gaifqXHyXhxccv2@cluster0.fsx0whh.mongodb.net/?connectTimeoutMS=5000&serverSelectionTimeoutMS=5000";
+    // Update with your MongoDB Atlas connection string (replace with your credentials)
+    private static final String CONNECTION_STRING = "mongodb+srv://youssefshafik04:1gaifqXHyXhxccv2@cluster0.fsx0whh.mongodb.net/?retryWrites=true&w=majority&connectTimeoutMS=5000&serverSelectionTimeoutMS=5000";
     private static final String DATABASE_NAME = "collaborative_editor";
     private static final String USERS_COLLECTION = "users";
     private static final String DOCUMENTS_COLLECTION = "documents";
@@ -62,9 +62,7 @@ public class DatabaseService {
         try {
             System.out.println("==================================================");
             System.out.println("Attempting to connect to MongoDB Atlas...");
-            System.out.println("Connection string: " + CONNECTION_STRING);
-            System.out.println("Database name: " + DATABASE_NAME);
-            System.out.println("==================================================");
+            System.out.println("Using connection string: " + CONNECTION_STRING.replaceAll(":[^/]+@", ":******@"));
             
             // Set a shorter connection timeout (5 seconds instead of 30)
             mongoClient = MongoClients.create(CONNECTION_STRING);
@@ -84,7 +82,19 @@ public class DatabaseService {
             System.out.println("MongoDB connection successful!");
             System.out.println("Users collection: " + userCount + " documents");
             System.out.println("Documents collection: " + docCount + " documents");
+            System.out.println("Your data will be saved persistently to MongoDB");
             System.out.println("==================================================");
+            
+            // Ensure collections exist - if they don't, create them
+            if (!collectionExists(USERS_COLLECTION)) {
+                database.createCollection(USERS_COLLECTION);
+                System.out.println("Created users collection");
+            }
+            
+            if (!collectionExists(DOCUMENTS_COLLECTION)) {
+                database.createCollection(DOCUMENTS_COLLECTION);
+                System.out.println("Created documents collection");
+            }
             
             useInMemoryStorage = false;
             mongoDbConnected = true;
@@ -93,7 +103,7 @@ public class DatabaseService {
             System.err.println("ERROR: Failed to connect to MongoDB Atlas!");
             System.err.println("Error message: " + e.getMessage());
             System.err.println("IMPORTANT: FALLING BACK TO IN-MEMORY STORAGE!");
-            System.err.println("WARNING: Your data will NOT be saved to MongoDB!");
+            System.err.println("WARNING: Your data will NOT be saved permanently!");
             System.err.println("==================================================");
             e.printStackTrace();
             
@@ -113,6 +123,18 @@ public class DatabaseService {
             // Create a demo user for easier testing when MongoDB is not available
             createDemoUser();
         }
+    }
+    
+    /**
+     * Checks if a collection exists in the database.
+     */
+    private boolean collectionExists(String collectionName) {
+        for (String name : database.listCollectionNames()) {
+            if (name.equals(collectionName)) {
+                return true;
+            }
+        }
+        return false;
     }
     
     /**
@@ -144,6 +166,14 @@ public class DatabaseService {
      * @return True if registration was successful, false otherwise.
      */
     public boolean registerUser(String username, String password) {
+        if (username == null || username.trim().isEmpty() || password == null || password.isEmpty()) {
+            System.err.println("Cannot register user: Username or password is empty");
+            return false;
+        }
+        
+        // Trim username for consistency
+        username = username.trim();
+        
         if (useInMemoryStorage) {
             System.out.println("Using in-memory storage for user registration: " + username);
             return registerUserInMemory(username, password);
@@ -172,7 +202,8 @@ public class DatabaseService {
             Document newUser = new Document()
                     .append("username", username)
                     .append("password", hashedPassword)
-                    .append("createdAt", new Date());
+                    .append("createdAt", new Date())
+                    .append("lastLogin", new Date());
             
             // Insert the user into MongoDB
             usersCollection.insertOne(newUser);
@@ -207,6 +238,7 @@ public class DatabaseService {
         User user = new User(userId, username, hashedPassword, new Date());
         userMap.put(userId, user);
         
+        System.out.println("Successfully registered user in memory: " + username + " with ID: " + userId);
         return true;
     }
     
@@ -217,6 +249,14 @@ public class DatabaseService {
      * @return The user ID if authentication was successful, null otherwise.
      */
     public String authenticateUser(String username, String password) {
+        if (username == null || username.trim().isEmpty() || password == null || password.isEmpty()) {
+            System.err.println("Cannot authenticate: Username or password is empty");
+            return null;
+        }
+        
+        // Trim username for consistency
+        username = username.trim();
+        
         if (useInMemoryStorage) {
             System.out.println("Using in-memory storage for authentication: " + username);
             return authenticateUserInMemory(username, password);
@@ -247,6 +287,12 @@ public class DatabaseService {
                     userId = idObj.toString();
                 }
                 
+                // Update last login time
+                usersCollection.updateOne(
+                    Filters.eq("_id", user.get("_id")), 
+                    Updates.set("lastLogin", new Date())
+                );
+                
                 System.out.println("Successfully authenticated user in MongoDB: " + username + " with ID: " + userId);
                 return userId;
             } else {
@@ -266,6 +312,9 @@ public class DatabaseService {
         for (Map.Entry<String, User> entry : userMap.entrySet()) {
             if (entry.getValue().username.equals(username)) {
                 if (BCrypt.checkpw(password, entry.getValue().hashedPassword)) {
+                    // Update last login time
+                    entry.getValue().lastLogin = new Date();
+                    System.out.println("Successfully authenticated user in memory: " + username + " with ID: " + entry.getKey());
                     return entry.getKey();
                 }
                 return null;
@@ -278,6 +327,7 @@ public class DatabaseService {
             String hashedPassword = BCrypt.hashpw(password, BCrypt.gensalt());
             User user = new User(userId, username, hashedPassword, new Date());
             userMap.put(userId, user);
+            System.out.println("Auto-created and authenticated user in memory: " + username + " with ID: " + userId);
             return userId;
         }
         
@@ -381,63 +431,127 @@ public class DatabaseService {
      * @return True if the update was successful, false otherwise.
      */
     public boolean updateDocumentWithSession(String documentId, String content, 
-                                            String editorCode, String viewerCode) {
+                                          String editorCode, String viewerCode) {
         if (useInMemoryStorage) {
             return updateDocumentWithSessionInMemory(documentId, content, editorCode, viewerCode);
         }
         
         try {
-            // Handle different ID formats safely
-            Object idToQuery;
-            try {
-                // First try to parse as ObjectId
-                idToQuery = new ObjectId(documentId);
-            } catch (Exception e) {
-                // If it fails, use as string ID
-                System.out.println("Using string ID instead of ObjectId: " + documentId);
-                idToQuery = documentId;
+            // Check MongoDB connection status first
+            if (!mongoDbConnected) {
+                System.out.println("MongoDB not connected, falling back to in-memory storage");
+                return updateDocumentWithSessionInMemory(documentId, content, editorCode, viewerCode);
             }
             
-            Bson filter = Filters.eq("_id", idToQuery);
-            Bson update = Updates.combine(
-                    Updates.set("content", content),
-                    Updates.set("editorCode", editorCode),
-                    Updates.set("viewerCode", viewerCode),
-                    Updates.set("updatedAt", new Date())
-            );
+            // Try to safely convert the document ID to an ObjectId
+            Object documentObjectId;
+            try {
+                documentObjectId = new ObjectId(documentId);
+            } catch (Exception e) {
+                System.out.println("Invalid ObjectId format, using string ID: " + documentId);
+                documentObjectId = documentId;
+            }
             
-            documentsCollection.updateOne(filter, update);
-            return true;
+            // Create the update document with the new fields
+            Document update = new Document();
+            if (content != null) {
+                update.append("content", content);
+            }
+            update.append("editorCode", editorCode)
+                  .append("viewerCode", viewerCode)
+                  .append("updatedAt", new Date());
+            
+            try {
+                // Try to update the document safely
+                documentsCollection.updateOne(
+                    Filters.eq("_id", documentObjectId),
+                    new Document("$set", update));
+                return true;
+            } catch (IllegalStateException e) {
+                // This is a connection state error - mark connection as closed and try to reconnect
+                System.out.println("MongoDB connection state error: " + e.getMessage());
+                mongoDbConnected = false;
+                
+                // Try once to reconnect
+                if (attemptReconnect()) {
+                    try {
+                        documentsCollection.updateOne(
+                            Filters.eq("_id", documentObjectId),
+                            new Document("$set", update));
+                        return true;
+                    } catch (Exception e2) {
+                        System.err.println("Update failed even after reconnect: " + e2.getMessage());
+                        return updateDocumentWithSessionInMemory(documentId, content, editorCode, viewerCode);
+                    }
+                } else {
+                    // If reconnection failed, fall back to in-memory
+                    return updateDocumentWithSessionInMemory(documentId, content, editorCode, viewerCode);
+                }
+            } catch (Exception e) {
+                System.err.println("Error updating document: " + e.getMessage());
+                return updateDocumentWithSessionInMemory(documentId, content, editorCode, viewerCode);
+            }
         } catch (Exception e) {
             System.err.println("Error updating document with session: " + e.getMessage());
-            e.printStackTrace();
             return updateDocumentWithSessionInMemory(documentId, content, editorCode, viewerCode);
         }
     }
     
-    private boolean updateDocumentWithSessionInMemory(String documentId, String content, 
-                                                     String editorCode, String viewerCode) {
-        InMemoryDocument document = documentMap.get(documentId);
-        if (document != null) {
-            document.content = content;
-            document.editorCode = editorCode;
-            document.viewerCode = viewerCode;
-            document.updatedAt = new Date();
-            return true;
-        }
-        return false;
-    }
-    
     /**
-     * Updates a document's content and session code (legacy method).
-     * @param documentId The document ID.
-     * @param content The new content.
-     * @param sessionCode The session code.
-     * @return True if the update was successful, false otherwise.
+     * Attempts to reconnect to MongoDB after a connection failure.
+     * @return true if the reconnection was successful, false otherwise.
      */
-    public boolean updateDocumentWithSession(String documentId, String content, String sessionCode) {
-        // For backward compatibility - use the same code for both editor and viewer
-        return updateDocumentWithSession(documentId, content, sessionCode, sessionCode);
+    private synchronized boolean attemptReconnect() {
+        // If we're already using in-memory storage, no need to attempt reconnection
+        if (useInMemoryStorage) {
+            return false;
+        }
+        
+        System.out.println("Attempting to reconnect to MongoDB...");
+        
+        try {
+            // Close existing client if any
+            if (mongoClient != null) {
+                try {
+                    mongoClient.close();
+                } catch (Exception e) {
+                    // Ignore cleanup errors
+                }
+                mongoClient = null;
+            }
+            
+            // Create a new client with a shorter timeout
+            mongoClient = MongoClients.create(
+                CONNECTION_STRING + "&connectTimeoutMS=2000&serverSelectionTimeoutMS=2000");
+            database = mongoClient.getDatabase(DATABASE_NAME);
+            
+            // Test the connection by checking if the database exists
+            database.runCommand(new Document("ping", 1));
+            
+            // If we get here, the connection is successful
+            System.out.println("Successfully reconnected to MongoDB");
+            
+            // Re-initialize collections
+            usersCollection = database.getCollection(USERS_COLLECTION);
+            documentsCollection = database.getCollection(DOCUMENTS_COLLECTION);
+            
+            mongoDbConnected = true;
+            return true;
+        } catch (Exception e) {
+            // If we still can't connect, switch to in-memory mode
+            System.err.println("Failed to reconnect to MongoDB: " + e.getMessage());
+            
+            if (!useInMemoryStorage) {
+                System.out.println("Permanently switching to in-memory storage after repeated connection failures");
+                useInMemoryStorage = true;
+                
+                // Create a demo user if in-memory storage is empty
+                if (userMap.isEmpty()) {
+                    createDemoUser();
+                }
+            }
+            return false;
+        }
     }
     
     /**
@@ -446,26 +560,69 @@ public class DatabaseService {
      * @return The document, or null if not found.
      */
     public Document getDocument(String documentId) {
+        if (documentId == null || documentId.isEmpty()) {
+            System.err.println("Cannot get document: Document ID is null or empty");
+            return null;
+        }
+        
+        System.out.println("Retrieving document with ID: " + documentId);
+        
         if (useInMemoryStorage) {
-            return getDocumentInMemory(documentId);
+            System.out.println("Using in-memory storage to retrieve document");
+            Document doc = getDocumentInMemory(documentId);
+            if (doc != null) {
+                System.out.println("Found document in memory with ID: " + documentId);
+                System.out.println("Title: " + doc.getString("title"));
+                System.out.println("Content length: " + (doc.getString("content") != null ? doc.getString("content").length() : 0) + " characters");
+            } else {
+                System.out.println("Document not found in memory: " + documentId);
+            }
+            return doc;
         }
         
         try {
+            // Double-check MongoDB connection
+            if (!mongoDbConnected || database == null) {
+                System.err.println("MongoDB not connected for document retrieval, falling back to in-memory");
+                return getDocumentInMemory(documentId);
+            }
+            
+            System.out.println("Looking up document in MongoDB with ID: " + documentId);
+            
             // Handle different ID formats safely
             Object idToQuery;
             try {
                 // First try to parse as ObjectId
                 idToQuery = new ObjectId(documentId);
+                System.out.println("Using ObjectId format: " + idToQuery);
             } catch (Exception e) {
                 // If it fails, use as string ID
-                System.out.println("Using string ID instead of ObjectId: " + documentId);
+                System.out.println("Using string ID format: " + documentId);
                 idToQuery = documentId;
             }
             
-            return documentsCollection.find(Filters.eq("_id", idToQuery)).first();
+            Document doc = documentsCollection.find(Filters.eq("_id", idToQuery)).first();
+            
+            if (doc != null) {
+                System.out.println("Document found in MongoDB: " + documentId);
+                System.out.println("Title: " + doc.getString("title"));
+                System.out.println("Content length: " + (doc.getString("content") != null ? doc.getString("content").length() : 0) + " characters");
+                
+                // If content is null, set it to empty string for safety
+                if (doc.getString("content") == null) {
+                    doc.append("content", "");
+                }
+            } else {
+                System.err.println("Document not found in MongoDB: " + documentId);
+            }
+            
+            return doc;
         } catch (Exception e) {
-            System.err.println("Error getting document: " + e.getMessage());
+            System.err.println("Error getting document from MongoDB: " + e.getMessage());
             e.printStackTrace();
+            
+            // Try in-memory as fallback
+            System.out.println("Falling back to in-memory storage due to error");
             return getDocumentInMemory(documentId);
         }
     }
@@ -494,16 +651,48 @@ public class DatabaseService {
      */
     public List<Document> getDocumentsByOwner(String ownerId) {
         if (useInMemoryStorage) {
+            System.out.println("Using in-memory storage to retrieve documents for user: " + ownerId);
             return getDocumentsByOwnerInMemory(ownerId);
         }
         
         List<Document> documents = new ArrayList<>();
         try {
+            System.out.println("Retrieving documents from MongoDB for user: " + ownerId);
+            
+            // Double-check MongoDB connection
+            if (!mongoDbConnected || database == null) {
+                System.err.println("MongoDB not connected for document retrieval, using in-memory");
+                return getDocumentsByOwnerInMemory(ownerId);
+            }
+            
+            // Create index on ownerId if it doesn't exist for better performance
+            try {
+                documentsCollection.createIndex(Filters.eq("ownerId", 1));
+            } catch (Exception e) {
+                // Ignore index creation errors
+                System.out.println("Note: Could not create index on ownerId: " + e.getMessage());
+            }
+            
+            // Find documents with the given owner ID
             documentsCollection.find(Filters.eq("ownerId", ownerId))
                     .forEach(documents::add);
+            
+            System.out.println("Retrieved " + documents.size() + " documents from MongoDB for user: " + ownerId);
+            
+            // If no documents found, create a default document
+            if (documents.isEmpty()) {
+                System.out.println("No documents found for user, creating default document");
+                String docId = createDocument("Untitled Document", ownerId);
+                Document newDoc = getDocument(docId);
+                if (newDoc != null) {
+                    documents.add(newDoc);
+                    System.out.println("Created default document with ID: " + docId);
+                }
+            }
+            
             return documents;
         } catch (Exception e) {
-            System.err.println("Error getting documents: " + e.getMessage());
+            System.err.println("Error getting documents from MongoDB: " + e.getMessage());
             e.printStackTrace();
             return getDocumentsByOwnerInMemory(ownerId);
         }
@@ -613,98 +802,101 @@ public class DatabaseService {
      * @return true if MongoDB is connected, false if using in-memory storage
      */
     public boolean testMongoDBConnection() {
-        if (mongoDbConnected && mongoClient != null) {
-            try {
-                // Test the connection by running a simple command
-                database.runCommand(new Document("ping", 1));
-                
-                // Count documents to verify collections
-                long userCount = usersCollection.countDocuments();
-                long docCount = documentsCollection.countDocuments();
-                
-                System.out.println("==================================================");
-                System.out.println("MongoDB connection test: SUCCESS");
-                System.out.println("Connected to: " + DATABASE_NAME);
-                System.out.println("Users collection: " + userCount + " documents");
-                System.out.println("Documents collection: " + docCount + " documents");
-                System.out.println("==================================================");
-                
-                return true;
-            } catch (Exception e) {
-                System.err.println("==================================================");
-                System.err.println("MongoDB connection test: FAILED");
-                System.err.println("Error: " + e.getMessage());
-                System.err.println("Will attempt to reconnect...");
-                System.err.println("==================================================");
-                
-                // Close the existing client
+        try {
+            if (mongoDbConnected && mongoClient != null) {
                 try {
-                    mongoClient.close();
-                } catch (Exception ex) {
-                    // Ignore
+                    // Test the connection by running a simple command
+                    database.runCommand(new Document("ping", 1));
+                    
+                    // Count documents to verify collections
+                    long userCount = usersCollection.countDocuments();
+                    long docCount = documentsCollection.countDocuments();
+                    
+                    System.out.println("==================================================");
+                    System.out.println("MongoDB connection test: SUCCESS");
+                    System.out.println("Connected to: " + DATABASE_NAME);
+                    System.out.println("Users collection: " + userCount + " documents");
+                    System.out.println("Documents collection: " + docCount + " documents");
+                    System.out.println("==================================================");
+                    
+                    return true;
+                } catch (Exception e) {
+                    System.err.println("==================================================");
+                    System.err.println("MongoDB connection test: FAILED");
+                    System.err.println("Error: " + e.getMessage());
+                    System.err.println("Will attempt to reconnect...");
+                    System.err.println("==================================================");
+                    
+                    // Close the existing client
+                    try {
+                        mongoClient.close();
+                    } catch (Exception ex) {
+                        // Ignore
+                    }
+                    
+                    // Try to reconnect
+                    return attemptReconnect();
                 }
+            } else if (mongoDbConnected && mongoClient == null) {
+                // This is an inconsistent state - try to reconnect
+                System.err.println("==================================================");
+                System.err.println("MongoDB connection state inconsistent!");
+                System.err.println("Attempting to reconnect...");
+                System.err.println("==================================================");
                 
-                // Try to reconnect
+                return attemptReconnect();
+            } else {
+                // Currently using in-memory storage
+                System.err.println("==================================================");
+                System.err.println("Currently using IN-MEMORY STORAGE.");
+                System.err.println("Your data is NOT being saved to MongoDB!");
+                System.err.println("Attempting to reconnect to MongoDB...");
+                System.err.println("==================================================");
+                
                 return attemptReconnect();
             }
-        } else if (!mongoDbConnected && !useInMemoryStorage) {
-            // This is an inconsistent state - try to reconnect
-            System.err.println("==================================================");
-            System.err.println("MongoDB connection state inconsistent!");
-            System.err.println("Attempting to reconnect...");
-            System.err.println("==================================================");
-            
-            return attemptReconnect();
-        } else {
-            // Currently using in-memory storage
-            System.err.println("==================================================");
-            System.err.println("Currently using IN-MEMORY STORAGE.");
-            System.err.println("Your data is NOT being saved to MongoDB!");
-            System.err.println("Attempting to reconnect to MongoDB...");
-            System.err.println("==================================================");
-            
-            return attemptReconnect();
+        } catch (Exception e) {
+            System.err.println("Error during connection test: " + e.getMessage());
+            e.printStackTrace();
+            return false;
         }
     }
     
     /**
-     * Attempts to reconnect to MongoDB.
-     * 
-     * @return true if reconnection was successful, false otherwise
+     * Gets the last login time for a user.
+     * @param userId The user ID.
+     * @return The last login time, or null if not found.
      */
-    private boolean attemptReconnect() {
+    public Date getLastLoginTime(String userId) {
+        if (useInMemoryStorage) {
+            User user = userMap.get(userId);
+            return user != null ? user.lastLogin : null;
+        }
+        
         try {
-            System.out.println("Attempting to connect to MongoDB...");
+            if (!mongoDbConnected) {
+                return null;
+            }
             
-            // Create new MongoDB client
-            mongoClient = MongoClients.create(CONNECTION_STRING);
+            // For MongoDB, first try to find the user by their ID
+            Document user = null;
+            try {
+                // Try to parse as ObjectId first
+                ObjectId objId = new ObjectId(userId);
+                user = usersCollection.find(Filters.eq("_id", objId)).first();
+            } catch (Exception e) {
+                // If not an ObjectId, try as string
+                user = usersCollection.find(Filters.eq("_id", userId)).first();
+            }
             
-            // Test connection immediately
-            database = mongoClient.getDatabase(DATABASE_NAME);
-            database.runCommand(new Document("ping", 1));
+            if (user != null) {
+                return user.getDate("lastLogin");
+            }
             
-            usersCollection = database.getCollection(USERS_COLLECTION);
-            documentsCollection = database.getCollection(DOCUMENTS_COLLECTION);
-            
-            // If we got here, connection is successful
-            System.out.println("==================================================");
-            System.out.println("Successfully reconnected to MongoDB!");
-            System.out.println("Your data will now be saved to MongoDB.");
-            System.out.println("==================================================");
-            
-            useInMemoryStorage = false;
-            mongoDbConnected = true;
-            return true;
+            return null;
         } catch (Exception e) {
-            System.err.println("==================================================");
-            System.err.println("Reconnection to MongoDB failed!");
-            System.err.println("Error: " + e.getMessage());
-            System.err.println("Continuing with in-memory storage.");
-            System.err.println("==================================================");
-            
-            useInMemoryStorage = true;
-            mongoDbConnected = false;
-            return false;
+            System.err.println("Error getting last login time: " + e.getMessage());
+            return null;
         }
     }
     
@@ -712,16 +904,18 @@ public class DatabaseService {
      * In-memory user class
      */
     private static class User {
-        public final String id;
-        public final String username;
-        public final String hashedPassword;
-        public final Date createdAt;
+        String id;
+        String username;
+        String hashedPassword;
+        Date createdAt;
+        Date lastLogin;
         
         public User(String id, String username, String hashedPassword, Date createdAt) {
             this.id = id;
             this.username = username;
             this.hashedPassword = hashedPassword;
             this.createdAt = createdAt;
+            this.lastLogin = createdAt; // Initialize lastLogin to createdAt
         }
     }
     
@@ -748,5 +942,115 @@ public class DatabaseService {
             this.createdAt = createdAt;
             this.updatedAt = updatedAt;
         }
+    }
+    
+    /**
+     * Gets a document by its session code (either editor or viewer code).
+     * 
+     * @param sessionCode The session code to search for.
+     * @return The document if found, null otherwise.
+     */
+    public Document getDocumentBySessionCode(String sessionCode) {
+        if (sessionCode == null || sessionCode.isEmpty()) {
+            return null;
+        }
+        
+        if (useInMemoryStorage) {
+            return getDocumentBySessionCodeInMemory(sessionCode);
+        }
+        
+        try {
+            // Check MongoDB connection
+            if (!mongoDbConnected && !attemptReconnect()) {
+                return getDocumentBySessionCodeInMemory(sessionCode);
+            }
+            
+            // Search for documents with matching session codes
+            Document doc = documentsCollection.find(
+                new Document("$or", List.of(
+                    new Document("editorCode", sessionCode),
+                    new Document("viewerCode", sessionCode)
+                ))
+            ).first();
+            
+            if (doc != null) {
+                System.out.println("Found document with session code: " + sessionCode + ", document ID: " + doc.get("_id"));
+                return doc;
+            } else {
+                System.out.println("No document found with session code: " + sessionCode);
+                return null;
+            }
+        } catch (Exception e) {
+            System.err.println("Error searching for document by session code: " + e.getMessage());
+            e.printStackTrace();
+            return null;
+        }
+    }
+    
+    /**
+     * Gets a document by session code from in-memory storage.
+     * 
+     * @param sessionCode The session code to search for.
+     * @return The document if found, null otherwise.
+     */
+    private Document getDocumentBySessionCodeInMemory(String sessionCode) {
+        for (InMemoryDocument doc : documentMap.values()) {
+            if ((doc.editorCode != null && doc.editorCode.equals(sessionCode)) ||
+                (doc.viewerCode != null && doc.viewerCode.equals(sessionCode))) {
+                
+                System.out.println("Found in-memory document with session code: " + sessionCode);
+                
+                // Convert to MongoDB Document format
+                Document document = new Document()
+                    .append("_id", doc.id)
+                    .append("title", doc.title)
+                    .append("ownerId", doc.ownerId)
+                    .append("content", doc.content)
+                    .append("editorCode", doc.editorCode)
+                    .append("viewerCode", doc.viewerCode)
+                    .append("createdAt", doc.createdAt)
+                    .append("updatedAt", doc.updatedAt);
+                
+                return document;
+            }
+        }
+        
+        System.out.println("No in-memory document found with session code: " + sessionCode);
+        return null;
+    }
+    
+    /**
+     * Updates a document's content and session code (legacy method).
+     * @param documentId The document ID.
+     * @param content The new content.
+     * @param sessionCode The session code.
+     * @return True if the update was successful, false otherwise.
+     */
+    public boolean updateDocumentWithSession(String documentId, String content, String sessionCode) {
+        // For backward compatibility - use the same code for both editor and viewer
+        return updateDocumentWithSession(documentId, content, sessionCode, sessionCode);
+    }
+    
+    /**
+     * Updates a document in memory with session codes.
+     * @param documentId The document ID.
+     * @param content The document content.
+     * @param editorCode The editor session code.
+     * @param viewerCode The viewer session code.
+     * @return True if successful, false otherwise.
+     */
+    private boolean updateDocumentWithSessionInMemory(String documentId, String content, 
+                                                     String editorCode, String viewerCode) {
+        InMemoryDocument document = documentMap.get(documentId);
+        if (document != null) {
+            if (content != null) {
+                document.content = content;
+            }
+            document.editorCode = editorCode;
+            document.viewerCode = viewerCode;
+            document.updatedAt = new Date();
+            return true;
+        }
+        return false;
     }
 } 
