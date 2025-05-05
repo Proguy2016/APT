@@ -15,7 +15,7 @@
     "envVars": [
       {
         "name": "MONGODB_URI",
-        "value": "mongodb://centerbeam.proxy.rlwy.net:26289"
+        "value": "mongodb://mongo:TbzFrDxwYs8eQXVP6TUO@centerbeam.proxy.rlwy.net:26289"
       },
       {
         "name": "MONGODB_DATABASE",

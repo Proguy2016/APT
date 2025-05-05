@@ -29,7 +29,8 @@ public class DatabaseService {
             "mongodb://localhost:27017";
             
     // Fallback connection string for Railway if MONGODB_URI is not set
-    private static final String RAILWAY_CONNECTION_STRING = "mongodb://centerbeam.proxy.rlwy.net:26289";
+    // Use username and password from Railway dashboard
+    private static final String RAILWAY_CONNECTION_STRING = "mongodb://mongo:TbzFrDxwYs8eQXVP6TUO@centerbeam.proxy.rlwy.net:26289";
     
     private static final String DATABASE_NAME = System.getenv("MONGODB_DATABASE") != null ? 
             System.getenv("MONGODB_DATABASE") : 

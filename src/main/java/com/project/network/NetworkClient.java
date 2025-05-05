@@ -110,7 +110,13 @@ public class NetworkClient {
                 return true;
             }
             
-            System.out.println("Connecting to WebSocket server");
+            System.out.println("Connecting to WebSocket server: " + DEFAULT_SERVER_URI);
+            
+            // Log Java version for debugging
+            System.out.println("Java version: " + System.getProperty("java.version"));
+            
+            // Enable SSL debugging if needed
+            // System.setProperty("javax.net.debug", "ssl,handshake");
             
             // First, clear any disconnected users from UI
             purgeDisconnectedUsers();
@@ -140,7 +146,7 @@ public class NetworkClient {
                 @Override
                 public void onClose(int code, String reason, boolean remote) {
                     connected = false;
-                    System.out.println("Connection closed: " + reason);
+                    System.out.println("Connection closed: " + reason + " (code: " + code + ")");
                     
                     // Clear presence data since we're no longer connected
                     lastKnownCursorPositions.clear();
@@ -177,20 +183,21 @@ public class NetworkClient {
             };
             
             // Set connection timeout
-            webSocketClient.setConnectionLostTimeout(30);
+            webSocketClient.setConnectionLostTimeout(60);
             
             // Connect with timeout
             boolean success = false;
             try {
-                success = webSocketClient.connectBlocking(5, java.util.concurrent.TimeUnit.SECONDS);
+                System.out.println("Attempting to connect with 10 second timeout...");
+                success = webSocketClient.connectBlocking(10, java.util.concurrent.TimeUnit.SECONDS);
             } catch (InterruptedException e) {
                 System.err.println("Connection interrupted: " + e.getMessage());
                 Thread.currentThread().interrupt();
             }
             
             if (!success) {
-                System.err.println("Failed to connect to WebSocket server");
-                notifyErrorListeners("Failed to connect to collaboration server");
+                System.err.println("Failed to connect to WebSocket server: " + DEFAULT_SERVER_URI);
+                notifyErrorListeners("Failed to connect to collaboration server at " + DEFAULT_SERVER_URI);
                 return false;
             }
             
@@ -1422,9 +1429,29 @@ public class NetworkClient {
             // Log the original URL from environment
             System.out.println("Original SERVER_URL from environment: " + serverUrl);
             
-            // Use the URL exactly as provided in the environment variable
-            // Railway handles the protocol and port automatically
-            System.out.println("Using WebSocket URL: " + serverUrl);
+            // Keep the URL as is if it already has a protocol
+            if (serverUrl.startsWith("ws://") || serverUrl.startsWith("wss://")) {
+                System.out.println("Using WebSocket URL with protocol: " + serverUrl);
+                return serverUrl;
+            }
+            
+            // If the URL starts with https, convert to wss
+            if (serverUrl.startsWith("https://")) {
+                serverUrl = "wss://" + serverUrl.substring(8);
+                System.out.println("Converted HTTPS to WSS: " + serverUrl);
+            } else if (!serverUrl.startsWith("ws://") && !serverUrl.startsWith("wss://")) {
+                // If URL doesn't have a protocol, add wss://
+                serverUrl = "wss://" + serverUrl;
+                System.out.println("Added WSS protocol: " + serverUrl);
+            }
+            
+            // Ensure URL ends with a trailing slash
+            if (!serverUrl.endsWith("/")) {
+                serverUrl = serverUrl + "/";
+                System.out.println("Added trailing slash: " + serverUrl);
+            }
+            
+            System.out.println("Final WebSocket URL: " + serverUrl);
             return serverUrl;
         }
         
