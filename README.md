@@ -20,12 +20,14 @@ A real-time collaborative text editor implemented in Java with JavaFX. This appl
 ## How to Build and Run
 
 1. Clone the repository:
+
    ```
    git clone <repository-url>
    cd collaborative-editor
    ```
 
 2. Build the project using Maven:
+
    ```
    mvn clean package
    ```
@@ -40,21 +42,25 @@ A real-time collaborative text editor implemented in Java with JavaFX. This appl
 1. **Starting the application**: When you start the application, you'll see a text editor interface.
 
 2. **Creating a document**:
+
    - Type directly in the text area
    - Or import a text file via File > Import File...
 
 3. **Sharing a document**:
+
    - Click "Share" or select Collaboration > Generate Sharing Codes
    - Two codes will be generated:
      - Editor Code: Allows users to edit the document
      - Viewer Code: Allows users to view the document (read-only)
 
 4. **Joining a session**:
+
    - Click "Join" or select Collaboration > Join Session
    - Enter the code you received
    - Choose whether to join as an editor or viewer (viewer role is enforced by the code)
 
 5. **Collaborative editing**:
+
    - Type to add text
    - Press Backspace/Delete to remove text
    - You'll see other users' cursors in different colors
@@ -68,11 +74,13 @@ A real-time collaborative text editor implemented in Java with JavaFX. This appl
 The application is built with the following components:
 
 1. **UI Layer (JavaFX)**:
+
    - EditorController: Manages the user interface and interactions
    - CursorMarker: Visual representation of other users' cursors
    - Dialog components for interactions
 
 2. **CRDT Implementation**:
+
    - CRDTDocument: Main document model using a tree-based CRDT
    - CRDTCharacter: A character in the document with position information
    - Position: A unique position in the document
@@ -93,4 +101,4 @@ The Conflict-free Replicated Data Type (CRDT) used in this application is a tree
 
 ## License
 
-[MIT License](LICENSE) 
+[MIT License](LICENSE)

@@ -1888,6 +1888,11 @@ public class EditorController {
      */
     private void joinExistingSession(String code, boolean isEditorRole) {
         try {
+            System.out.println("======== JOIN EXISTING SESSION ========");
+            System.out.println("Code: " + code);
+            System.out.println("Role: " + (isEditorRole ? "EDITOR" : "VIEWER"));
+            System.out.println("User ID: " + userId);
+            
             // Save this code to recent session codes
             DocumentSelectionDialog.saveRecentSessionCode(code);
             
@@ -1945,6 +1950,7 @@ public class EditorController {
             
         } catch (Exception e) {
             updateStatus("Error joining session: " + e.getMessage());
+            System.err.println("Error in joinExistingSession: " + e.getMessage());
             e.printStackTrace();
         }
     }
@@ -1953,7 +1959,8 @@ public class EditorController {
      * Completes the session join process after ensuring connection is established
      */
     private void completeJoinSession(String code, boolean isEditorRole) {
-        // Important: Join the session with the server
+        try {
+            // Important: Join the session with the server
             System.out.println("Joining session with code: " + code + " as " + (isEditorRole ? "editor" : "viewer"));
             networkClient.joinSession(code, isEditor);
             
@@ -1971,8 +1978,8 @@ public class EditorController {
             // Wait a moment to let the session join process complete
             new Thread(() -> {
                 try {
-                // Give the server more time to process the join
-                Thread.sleep(1000);
+                    // Give the server time to process the join
+                    Thread.sleep(1000);
                     
                     // Now create/update the local document for this session
                     Platform.runLater(() -> {
@@ -1986,20 +1993,27 @@ public class EditorController {
                                 new Operation(Operation.Type.REQUEST_DOCUMENT_RESYNC, null, null, userId, -1);
                             handleRemoteOperation(requestResyncOperation);
                         
-                        // Also force sending our current document state to the server
-                        if (document != null && isEditor) {
-                            String currentText = document.getText();
-                            networkClient.sendDocumentUpdate(currentText);
-                        }
+                            // Also force sending our current document state to the server
+                            if (document != null && isEditor) {
+                                String currentText = document.getText();
+                                networkClient.sendDocumentUpdate(currentText);
+                            }
                         } catch (Exception e) {
+                            System.err.println("Error in document sync after join: " + e.getMessage());
                             updateStatus("Error creating document: " + e.getMessage());
                             e.printStackTrace();
                         }
                     });
                 } catch (Exception e) {
+                    System.err.println("Error in join session thread: " + e.getMessage());
                     e.printStackTrace();
                 }
             }).start();
+        } catch (Exception e) {
+            System.err.println("Error in completeJoinSession: " + e.getMessage());
+            updateStatus("Error joining session: " + e.getMessage());
+            e.printStackTrace();
+        }
     }
     
     /**

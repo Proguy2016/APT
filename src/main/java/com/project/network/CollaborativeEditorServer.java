@@ -318,7 +318,7 @@ public class CollaborativeEditorServer extends WebSocketServer {
         }
         
         // Get or create the session
-        final EditorSession session; 
+        final EditorSession session;
         EditorSession existingSession = sessionsByCode.get(sessionId);
         if (existingSession == null) {
             // Create a new session if it doesn't exist - makes joining more reliable
@@ -331,6 +331,13 @@ public class CollaborativeEditorServer extends WebSocketServer {
         
         // Check if joining as editor or viewer
         boolean asEditor = message.has("asEditor") && message.get("asEditor").getAsBoolean();
+        
+        // Check authorization - verify the user is allowed to join as an editor if they requested that role
+        if (asEditor && !sessionId.equals(session.getEditorCode())) {
+            sendError(conn, "Not authorized to join as editor with this code");
+            System.out.println("User " + userId + " tried to join as editor but used viewer code");
+            return;
+        }
         
         // Add user to session based on role
         if (asEditor) {

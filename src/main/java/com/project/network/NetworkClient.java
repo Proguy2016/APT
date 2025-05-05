@@ -428,7 +428,15 @@ public class NetworkClient {
         message.addProperty("code", code); // Use code for backward compatibility
         message.addProperty("asEditor", isEditor);
         
-        webSocketClient.send(gson.toJson(message));
+        try {
+            String jsonMessage = gson.toJson(message);
+            System.out.println("Sending join message: " + jsonMessage);
+            webSocketClient.send(jsonMessage);
+        } catch (Exception e) {
+            System.err.println("ERROR SENDING JOIN REQUEST: " + e.getMessage());
+            e.printStackTrace();
+            notifyErrorListeners("Failed to send join request: " + e.getMessage());
+        }
     }
     
     /**
