@@ -23,9 +23,18 @@ import java.util.UUID;
  * This implementation can work without MongoDB by using in-memory storage.
  */
 public class DatabaseService {
-    // Update with your MongoDB Atlas connection string (replace with your credentials)
-    private static final String CONNECTION_STRING = "mongodb+srv://youssefshafik04:1gaifqXHyXhxccv2@cluster0.fsx0whh.mongodb.net/?retryWrites=true&w=majority&connectTimeoutMS=5000&serverSelectionTimeoutMS=5000";
-    private static final String DATABASE_NAME = "collaborative_editor";
+    // Get MongoDB connection string from environment variable or use default for local development
+    private static final String CONNECTION_STRING = System.getenv("MONGODB_URI") != null ? 
+            System.getenv("MONGODB_URI") : 
+            "mongodb://localhost:27017";
+            
+    // Fallback connection string for Railway if MONGODB_URI is not set
+    private static final String RAILWAY_CONNECTION_STRING = "mongodb://centerbeam.proxy.rlwy.net:26289";
+    
+    private static final String DATABASE_NAME = System.getenv("MONGODB_DATABASE") != null ? 
+            System.getenv("MONGODB_DATABASE") : 
+            "collaborative_editor";
+            
     private static final String USERS_COLLECTION = "users";
     private static final String DOCUMENTS_COLLECTION = "documents";
     
@@ -61,11 +70,21 @@ public class DatabaseService {
     private DatabaseService() {
         try {
             System.out.println("==================================================");
-            System.out.println("Attempting to connect to MongoDB Atlas...");
-            System.out.println("Using connection string: " + CONNECTION_STRING.replaceAll(":[^/]+@", ":******@"));
+            System.out.println("Attempting to connect to MongoDB...");
+            
+            // First try the environment variable
+            String connectionStr = CONNECTION_STRING;
+            
+            // If environment variable isn't set, try Railway connection
+            if (connectionStr.equals("mongodb://localhost:27017")) {
+                System.out.println("MONGODB_URI environment variable not set, trying Railway connection");
+                connectionStr = RAILWAY_CONNECTION_STRING;
+            }
+            
+            System.out.println("Using connection string: " + connectionStr.replaceAll(":[^/]+@", ":******@"));
             
             // Set a shorter connection timeout (5 seconds instead of 30)
-            mongoClient = MongoClients.create(CONNECTION_STRING);
+            mongoClient = MongoClients.create(connectionStr);
             
             // Test connection immediately to fail fast
             database = mongoClient.getDatabase(DATABASE_NAME);
@@ -80,6 +99,7 @@ public class DatabaseService {
             
             System.out.println("==================================================");
             System.out.println("MongoDB connection successful!");
+            System.out.println("Database: " + DATABASE_NAME);
             System.out.println("Users collection: " + userCount + " documents");
             System.out.println("Documents collection: " + docCount + " documents");
             System.out.println("Your data will be saved persistently to MongoDB");
@@ -100,7 +120,7 @@ public class DatabaseService {
             mongoDbConnected = true;
         } catch (Exception e) {
             System.err.println("==================================================");
-            System.err.println("ERROR: Failed to connect to MongoDB Atlas!");
+            System.err.println("ERROR: Failed to connect to MongoDB!");
             System.err.println("Error message: " + e.getMessage());
             System.err.println("IMPORTANT: FALLING BACK TO IN-MEMORY STORAGE!");
             System.err.println("WARNING: Your data will NOT be saved permanently!");
