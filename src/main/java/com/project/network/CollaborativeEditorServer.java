@@ -1489,17 +1489,60 @@ public class CollaborativeEditorServer extends WebSocketServer {
     public static void main(String[] args) {
         int port = DEFAULT_PORT;
         
-        // Check if a custom port was specified
-        if (args.length > 0) {
+        // First try to get port from environment variable (for Railway/Heroku compatibility)
+        String portEnv = System.getenv("PORT");
+        if (portEnv != null && !portEnv.isEmpty()) {
+            try {
+                port = Integer.parseInt(portEnv);
+                System.out.println("Using PORT from environment variable: " + port);
+            } catch (NumberFormatException e) {
+                System.err.println("Invalid PORT environment variable: " + portEnv + ". Using default: " + DEFAULT_PORT);
+            }
+        } 
+        // Then check command line args if env var not found
+        else if (args.length > 0) {
             try {
                 port = Integer.parseInt(args[0]);
+                System.out.println("Using port from command line argument: " + port);
             } catch (NumberFormatException e) {
-                System.err.println("Invalid port number. Using default port " + DEFAULT_PORT);
+                System.err.println("Invalid port number in args. Using default port " + DEFAULT_PORT);
             }
+        } else {
+            System.out.println("No port specified in environment or args. Using default: " + DEFAULT_PORT);
         }
         
+        // Get host from environment variable (default to 0.0.0.0 for proper binding in containers)
+        String host = System.getenv("HOST");
+        if (host == null || host.isEmpty()) {
+            host = "0.0.0.0"; // Default for container environments
+        }
+        System.out.println("Using host: " + host);
+        
+        // Print environment info for debugging
+        System.out.println("Environment variables:");
+        System.out.println("  PORT: " + (portEnv != null ? portEnv : "not set"));
+        System.out.println("  HOST: " + System.getenv("HOST"));
+        System.out.println("  MONGODB_URI: " + (System.getenv("MONGODB_URI") != null ? 
+                System.getenv("MONGODB_URI").replaceAll(":[^/]+@", ":******@") : "not set"));
+        System.out.println("  MONGODB_DATABASE: " + System.getenv("MONGODB_DATABASE"));
+        
+        // Initialize server with the specified port
         CollaborativeEditorServer server = new CollaborativeEditorServer(port);
+        
+        // Register shutdown hook to properly close the server and database connection
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            System.out.println("Shutting down server...");
+            try {
+                server.stop();
+                DatabaseService.getInstance().close();
+            } catch (Exception e) {
+                System.err.println("Error during shutdown: " + e.getMessage());
+            }
+            System.out.println("Server stopped.");
+        }));
+        
+        // Start the server
         server.start();
-        System.out.println("Collaborative Editor Server started on port " + port);
+        System.out.println("Collaborative Editor Server started on " + host + ":" + port);
     }
 } 

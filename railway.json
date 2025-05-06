@@ -4,9 +4,18 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "java -Xms64m -Xmx256m -jar target/collaborative-editor-1.0-SNAPSHOT.jar",
     "healthcheckEnabled": false,
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10
+    "restartPolicyMaxRetries": 10,
+    "envVars": [
+      {
+        "name": "MONGODB_URI",
+        "value": "mongodb://mongo:InLginAnmktFiZxGJRuqWcmtAbRROPnC@centerbeam.proxy.rlwy.net:26289"
+      },
+      {
+        "name": "MONGODB_DATABASE",
+        "value": "collaborative_editor"
+      }
+    ]
   }
 } 

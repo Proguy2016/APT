@@ -1,0 +1,13 @@
+[phases.setup]
+nixPkgs = ["openjdk17"]
+
+[phases.build]
+cmds = [
+  "mvn clean package -DskipTests",
+  "ls -la target/",
+  "mkdir -p /app/build/",
+  "cp target/collaborative-editor-1.0-SNAPSHOT.jar /app/build/app.jar"
+]
+
+[start]
+cmd = "java -jar /app/build/app.jar" 

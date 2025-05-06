@@ -23,9 +23,15 @@ import java.util.UUID;
  * This implementation can work without MongoDB by using in-memory storage.
  */
 public class DatabaseService {
-    // Update with your MongoDB Atlas connection string (replace with your credentials)
-    private static final String CONNECTION_STRING = "mongodb+srv://youssefshafik04:1gaifqXHyXhxccv2@cluster0.fsx0whh.mongodb.net/?retryWrites=true&w=majority&connectTimeoutMS=5000&serverSelectionTimeoutMS=5000";
-    private static final String DATABASE_NAME = "collaborative_editor";
+    // Get MongoDB connection string from environment variable or use default for local development
+    private static final String CONNECTION_STRING = System.getenv("MONGODB_URI") != null ? 
+            System.getenv("MONGODB_URI") : 
+            "mongodb://mongo:InLginAnmktFiZxGJRuqWcmtAbRROPnC@centerbeam.proxy.rlwy.net:26289";
+            
+    private static final String DATABASE_NAME = System.getenv("MONGODB_DATABASE") != null ? 
+            System.getenv("MONGODB_DATABASE") : 
+            "collaborative_editor";
+            
     private static final String USERS_COLLECTION = "users";
     private static final String DOCUMENTS_COLLECTION = "documents";
     
@@ -61,10 +67,18 @@ public class DatabaseService {
     private DatabaseService() {
         try {
             System.out.println("==================================================");
-            System.out.println("Attempting to connect to MongoDB Atlas...");
+            System.out.println("Attempting to connect to MongoDB...");
+            
+            // Print environment information for debugging
+            System.out.println("Environment variables:");
+            System.out.println("  MONGODB_URI: " + (System.getenv("MONGODB_URI") != null ? 
+                    System.getenv("MONGODB_URI").replaceAll(":[^/]+@", ":******@") : "not set"));
+            System.out.println("  MONGODB_DATABASE: " + (System.getenv("MONGODB_DATABASE") != null ? 
+                    System.getenv("MONGODB_DATABASE") : "not set"));
+            
             System.out.println("Using connection string: " + CONNECTION_STRING.replaceAll(":[^/]+@", ":******@"));
             
-            // Set a shorter connection timeout (5 seconds instead of 30)
+            // Set a shorter connection timeout 
             mongoClient = MongoClients.create(CONNECTION_STRING);
             
             // Test connection immediately to fail fast
@@ -80,6 +94,7 @@ public class DatabaseService {
             
             System.out.println("==================================================");
             System.out.println("MongoDB connection successful!");
+            System.out.println("Database: " + DATABASE_NAME);
             System.out.println("Users collection: " + userCount + " documents");
             System.out.println("Documents collection: " + docCount + " documents");
             System.out.println("Your data will be saved persistently to MongoDB");
@@ -100,7 +115,7 @@ public class DatabaseService {
             mongoDbConnected = true;
         } catch (Exception e) {
             System.err.println("==================================================");
-            System.err.println("ERROR: Failed to connect to MongoDB Atlas!");
+            System.err.println("ERROR: Failed to connect to MongoDB!");
             System.err.println("Error message: " + e.getMessage());
             System.err.println("IMPORTANT: FALLING BACK TO IN-MEMORY STORAGE!");
             System.err.println("WARNING: Your data will NOT be saved permanently!");
