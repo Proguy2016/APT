@@ -1,0 +1,1 @@
+web: java -Xms64m -Xmx256m -jar target/collaborative-editor-1.0-SNAPSHOT.jar 
